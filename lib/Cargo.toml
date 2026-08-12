@@ -1,0 +1,76 @@
+[package]
+name = "lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2.5.8"
+
+# base
+base64 = "0.23.1"
+z85 = "3.0.7"
+base91 = "0.1.0"
+
+# aead
+aes-gcm = { version = "0.11", features = ["rand_core", "getrandom"] }
+aes-gcm-siv = { version = "0.12", features = ["rand_core", "getrandom"] }
+chacha20poly1305 = { version = "0.11", features = ["rand_core", "getrandom"] }
+
+# compress
+lz4_flex = "0.14"
+flate2 = "1.1.9"
+zstd = "0.13.3"
+
+# ecc
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "getrandom"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "getrandom"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "getrandom"] }
+
+# hash
+sha2 = "0.11"
+blake3 = "1.8"
+hex = "0.4"
+
+# kdf
+pbkdf2 = { version = "0.13", features = ["hmac"] }
+scrypt = "0.12"
+hkdf = "0.13"
+
+# http
+httparse = "1.10.1"
+bytes = "1.12.1"
+
+
+# client only (tokio 运行时 + HTTP 客户端，不用于 wasm)
+tokio = { version = "1.53.1", features = ["net", "io-util", "time", "rt", "rt-multi-thread", "macros", "sync"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"], optional = true }
+futures-util = { version = "0.3", optional = true }
+
+# client only (MITM TLS，不用于 wasm)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+moka = { version = "0.12", optional = true, features = ["sync"] }
+time = { version = "0.3", optional = true }
+ipnetwork = { version = "0.21.1", optional = true }
+
+
+[features]
+default = ["client"]
+
+# 本地客户端：tokio 运行时 + HTTP 客户端 + MITM TLS
+client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:moka", "dep:time", "dep:ipnetwork"]
+
+# 服务端 (wasm) 构建：纯逻辑，无 tokio
+server = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }

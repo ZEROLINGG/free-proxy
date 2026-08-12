@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "server-dev": "cd server-rs && wrangler dev",
+    "server-deploy": "cd server-rs && wrangler deploy",
+    "client-dev": "cd client_tauri && pnpm tauri dev"
+  }
+}

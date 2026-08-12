@@ -1,0 +1,30 @@
+[package]
+name = "free-proxy"
+version = "0.1.0"
+edition = "2021"
+authors = ["ZEROLINGG <bcsz8833221@gmail.com>"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8", features = ['http', 'axum'] }
+worker-macros = { version = "0.8", features = ['http'] }
+axum = { version = "0.8", default-features = false }
+tower-service = "0.3.3"
+
+async-stream = "0.3"
+futures-util = "0.3"
+
+anyhow = "1.0.104"
+
+hex = "0.4.3"
+
+lib = { path = "../lib", default-features = false }
+
+[profile.release]
+#strip = "symbols"
+debug = 0
+opt-level = "z"
+lto = true
+codegen-units = 1
