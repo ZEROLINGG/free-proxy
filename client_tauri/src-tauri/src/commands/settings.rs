@@ -61,12 +61,11 @@ impl Default for ProxySettings {
 #[tauri::command]
 pub fn load_settings<R: Runtime>(app: AppHandle<R>) -> Result<ProxySettings> {
     let store = app.store(STORE_FILE).map_err(super::err_str)?;
-    match store
-        .get(SETTINGS_KEY)
-        .and_then(|v| serde_json::from_value(v).ok())
-    {
-        Some(settings) => Ok(settings),
-        None => Err("no such settings".into()),
+    // 文件缺失或尚无 settings 键（首次启动）→ 返回默认值，前端静默；
+    // 仅文件损坏（解析失败）报错，前端据此提示"已恢复默认配置"。
+    match store.get(SETTINGS_KEY) {
+        Some(value) => serde_json::from_value(value).map_err(super::err_str),
+        None => Ok(ProxySettings::default()),
     }
 }
 

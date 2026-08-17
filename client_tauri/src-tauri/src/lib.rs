@@ -1,11 +1,37 @@
 pub mod commands;
 
+#[cfg(desktop)]
+mod tray;
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    #[allow(unused)]
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_os::init());
+    #[cfg(desktop)]
+    {
+        use tauri::Manager;
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }));
+    }
+
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_machine_uid::init())
+        .setup(|_app| {
+            #[cfg(desktop)]
+            tray::init(_app.handle())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::settings::load_settings,
             commands::settings::save_settings,
@@ -17,6 +43,7 @@ pub fn run() {
             commands::proxy::proxy_set_ip,
             commands::proxy::open_ca_dir,
             commands::proxy::ca_info,
+            commands::proxy::install_ca,
             commands::proxy::proxy_check_availability,
             commands::speed::speed_test_start,
             commands::speed::speed_test_cancel,

@@ -2,3 +2,19 @@
 /logs
 /.idea
 /.playwright-mcp
+
+# 编辑器/工具备份文件
+*.rs.[0-9]
+*~
+*.swp
+
+# 敏感文件
+.env
+.env.*
+.dev.*
+*.pem
+*.key
+*.crt
+*.p12
+
+

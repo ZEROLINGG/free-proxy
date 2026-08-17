@@ -1,6 +1,11 @@
 import clsx from "clsx";
 import { useState } from "react";
-import { AEADS, COMPRESSORS, validateSettings, type SettingsErrors } from "../lib/types";
+import {
+  AEADS,
+  COMPRESSORS,
+  validateSettings,
+  type SettingsErrors,
+} from "../lib/types";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -11,11 +16,13 @@ import { useProxy } from "../store/proxy";
 import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
 
+type ErrorKey = keyof SettingsErrors;
+
 export function ProxySettingsPage() {
   const { settings, saved, loading, patch, save } = useSettings();
   const { status, health, healthBusy, checkHealth } = useProxy();
   const toast = useUi((s) => s.toast);
-  const [errors, setErrors] = useState<SettingsErrors>({});
+  const [touched, setTouched] = useState<Partial<Record<ErrorKey, boolean>>>({});
   const [saving, setSaving] = useState(false);
 
   const dirty = saved !== null && JSON.stringify(settings) !== JSON.stringify(saved);
@@ -24,23 +31,49 @@ export function ProxySettingsPage() {
       (k) => JSON.stringify(settings[k as keyof typeof settings]) !== JSON.stringify(saved?.[k as keyof typeof saved]),
     );
 
+  // 校验错误由 settings 派生（单一事实来源），touched 决定是否展示：
+  // 输入过的字段随输入即时更新错误，未触碰的字段等提交时再报，避免一打开就满屏红色。
+  const errs = validateSettings(settings);
+  const field = (k: ErrorKey) => (touched[k] ? errs[k] : undefined);
+  const markTouched = (k: ErrorKey) =>
+    setTouched((t) => (t[k] ? t : { ...t, [k]: true }));
+  const touchAll = () =>
+    setTouched({ domain: true, localPort: true, authKey: true, prefIp: true });
+
+  const sectionBadge = (keys: ErrorKey[]) =>
+    keys.some((k) => errs[k]) ? <Badge variant="error">未完成</Badge> : undefined;
+
+  const firstError = (e: SettingsErrors): ErrorKey | undefined =>
+    Object.keys(e)[0] as ErrorKey | undefined;
+
   const onSave = async () => {
-    const errs = validateSettings(settings);
-    setErrors(errs);
-    const firstErr = Object.keys(errs)[0];
+    const e = validateSettings(settings);
+    touchAll();
+    const firstErr = firstError(e);
     if (firstErr) {
-      toast(`配置有误：${errs[firstErr as keyof SettingsErrors]}`, "error");
+      toast(`配置有误：${e[firstErr]}`, "error");
       return;
     }
     setSaving(true);
     try {
       await save();
       toast("设置已保存", "success");
-    } catch (e) {
-      toast(`保存失败：${e}`, "error");
+    } catch (err) {
+      toast(`保存失败：${err}`, "error");
     } finally {
       setSaving(false);
     }
+  };
+
+  const onVerify = () => {
+    const e = validateSettings(settings);
+    touchAll();
+    const firstErr = firstError(e);
+    if (firstErr) {
+      toast(`配置有误：${e[firstErr]}`, "error");
+      return;
+    }
+    void checkHealth(settings);
   };
 
   if (loading) {
@@ -52,11 +85,9 @@ export function ProxySettingsPage() {
     );
   }
 
-  const field = (k: keyof SettingsErrors) => errors[k];
-
   return (
     <div className="flex flex-col gap-6">
-      <Panel title="Worker 连接">
+      <Panel title="Worker 连接" right={sectionBadge(["domain", "authKey"])}>
         <div className="divide-y divide-hairline">
           <ListRow className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-4">
             <span className="w-20 shrink-0 text-[13.5px] text-ink3">域名</span>
@@ -66,6 +97,7 @@ export function ProxySettingsPage() {
               placeholder="free-proxy.xxx.workers.dev"
               value={settings.domain}
               onChange={(e) => patch({ domain: e.target.value })}
+              onBlur={() => markTouched("domain")}
               error={field("domain")}
               // hint="如free-proxy.xxxxxx.workers.dev"
             />
@@ -91,13 +123,14 @@ export function ProxySettingsPage() {
               placeholder="与 Worker 部署时配置的 key 一致"
               value={settings.authKey}
               onChange={(e) => patch({ authKey: e.target.value })}
+              onBlur={() => markTouched("authKey")}
               error={field("authKey")}
             />
           </ListRow>
         </div>
       </Panel>
 
-      <Panel title="本地代理">
+      <Panel title="本地代理" right={sectionBadge(["localPort", "prefIp"])}>
         <div className="divide-y divide-hairline">
           <ListRow className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-4">
             <span className="w-20 shrink-0 text-[13.5px] text-ink3">端口</span>
@@ -107,6 +140,7 @@ export function ProxySettingsPage() {
               inputMode="numeric"
               value={String(settings.localPort)}
               onChange={(e) => patch({ localPort: Number(e.target.value) || 0 })}
+              onBlur={() => markTouched("localPort")}
               error={field("localPort")}
             />
           </ListRow>
@@ -118,6 +152,7 @@ export function ProxySettingsPage() {
               placeholder="留空走 DNS 解析，可在测速页自动选择"
               value={settings.prefIp ?? ""}
               onChange={(e) => patch({ prefIp: e.target.value || null })}
+              onBlur={() => markTouched("prefIp")}
               error={field("prefIp")}
             />
           </ListRow>
@@ -164,7 +199,7 @@ export function ProxySettingsPage() {
         <Button
           variant="secondary"
           loading={healthBusy}
-          onClick={() => checkHealth(settings)}
+          onClick={onVerify}
         >
           验证 Worker
         </Button>

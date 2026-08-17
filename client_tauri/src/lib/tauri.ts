@@ -23,6 +23,7 @@ export const api = {
   proxyCheckAvailability: () => invoke<void>("proxy_check_availability"),
   openCaDir: () => invoke<void>("open_ca_dir"),
   caInfo: () => invoke<CaInfo>("ca_info"),
+  installCa: () => invoke<void>("install_ca"),
   speedTestStart: (s: ProxySettings, opts: SpeedTestOpts) =>
     invoke<number>("speed_test_start", { s, opts }),
   speedTestCancel: () => invoke<void>("speed_test_cancel"),

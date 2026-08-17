@@ -48,6 +48,7 @@ bytes = "1.12.1"
 tokio = { version = "1.53.1", features = ["net", "io-util", "time", "rt", "rt-multi-thread", "macros", "sync"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"], optional = true }
 futures-util = { version = "0.3", optional = true }
+async-stream = { version = "0.3", optional = true }
 
 # client only (MITM TLS，不用于 wasm)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
@@ -63,7 +64,7 @@ ipnetwork = { version = "0.21.1", optional = true }
 default = ["client"]
 
 # 本地客户端：tokio 运行时 + HTTP 客户端 + MITM TLS
-client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:moka", "dep:time", "dep:ipnetwork"]
+client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:async-stream", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:moka", "dep:time", "dep:ipnetwork"]
 
 # 服务端 (wasm) 构建：纯逻辑，无 tokio
 server = []

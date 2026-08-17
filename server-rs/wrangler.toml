@@ -1,14 +1,24 @@
-# 客户端 Worker 端口固定由协议决定：HTTPS→443 / HTTP→80（无自定义端口配置）。
-# 本地调试：wrangler dev 默认监听 8787，与客户端不匹配。
-# 需改为 80（HTTP）或 443（HTTPS）：
-#   wrangler dev --port 80
-# 或在本文件添加：
-#   [dev]
-#   port = 80
-# 注意：80/443 通常需要空闲端口与特权（sudo）。
 name = "free-proxy"
 main = "build/index.js"
 compatibility_date = "2026-08-08"
 
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+[dev]
+port = 80
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

@@ -79,6 +79,8 @@ export interface SpeedTestState {
 export interface CaInfo {
   path: string;
   certPem: string;
+  /** 本次加载是否自动重建了 CA（设备 uid 变化/密钥文件损坏），需重新导入证书 */
+  rebuilt: boolean;
 }
 
 /** 代理可用性检测结果（proxy:availability 事件） */
@@ -118,13 +120,21 @@ export const DEFAULT_SETTINGS: ProxySettings = {
   prefIp: null,
 };
 
-export type SettingsErrors = Partial<Record<keyof ProxySettings, string>>;
+/** 可校验失败的字段（Select/Segmented 字段永远合法，无需校验） */
+export type ConfigErrorKey = "domain" | "localPort" | "authKey" | "prefIp";
+
+export type SettingsErrors = Partial<Record<ConfigErrorKey, string>>;
 
 
 export function validateSettings(s: ProxySettings): SettingsErrors {
   const e: SettingsErrors = {};
   const domain = s.domain.trim();
-  if (!domain) e.domain = "请填写 Worker 域名";
+  if (!domain) {
+    e.domain = "请填写 Worker 域名";
+  } else if (hasExplicitPort(domain)) {
+    // 与 Rust 端 Proxy::new 的校验对齐：域名携带端口会导致 token 派生不匹配（全链路 401）
+    e.domain = "域名不能携带端口";
+  }
   if (!Number.isInteger(s.localPort) || s.localPort < 1 || s.localPort > 65535)
     e.localPort = "端口范围 1–65535";
   if (!s.authKey) e.authKey = "请填写认证密钥";
@@ -137,6 +147,40 @@ export function validateSettings(s: ProxySettings): SettingsErrors {
   }
   return e;
 }
+
+/** 域名是否显式携带端口（与 Rust split_host_port 语义一致：裸 IPv6 不算）。 */
+function hasExplicitPort(host: string): boolean {
+  const h = host.trim();
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    if (end === -1) return false;
+    return h.slice(end + 1).startsWith(":");
+  }
+  if ((h.match(/:/g) ?? []).length >= 2) return false; // 裸 IPv6，无端口
+  return h.includes(":");
+}
+
+/** 配置完整性（由 settings 派生，UI 响应式使用）。 */
+export interface ConfigCompleteness {
+  ok: boolean;
+  errors: SettingsErrors;
+  /** 有错误的字段名（顺序稳定） */
+  invalidFields: ConfigErrorKey[];
+}
+
+export function configCompleteness(s: ProxySettings): ConfigCompleteness {
+  const errors = validateSettings(s);
+  const invalidFields = Object.keys(errors) as ConfigErrorKey[];
+  return { ok: invalidFields.length === 0, errors, invalidFields };
+}
+
+/** 字段 → 用户可读标签（完整性提示条等共用）。 */
+export const FIELD_LABELS: Record<ConfigErrorKey, string> = {
+  domain: "域名",
+  localPort: "端口",
+  authKey: "认证密钥",
+  prefIp: "优选 IP",
+};
 
 export function isAead(v: string): v is Aead {
   return AEADS.some((a) => a.value === v);

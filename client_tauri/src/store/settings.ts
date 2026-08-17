@@ -1,6 +1,12 @@
 import { create } from "zustand";
+import { isTauri } from "@tauri-apps/api/core";
 import { api } from "../lib/tauri";
-import { DEFAULT_SETTINGS, type ProxySettings } from "../lib/types";
+import {
+  configCompleteness,
+  DEFAULT_SETTINGS,
+  type ConfigCompleteness,
+  type ProxySettings,
+} from "../lib/types";
 import { useProxy } from "./proxy";
 import { useUi } from "./ui";
 
@@ -8,6 +14,8 @@ interface SettingsState {
   settings: ProxySettings;
   saved: ProxySettings | null;
   loading: boolean;
+  /** 配置完整性（由 settings 派生，patch/load 时同步更新） */
+  completeness: ConfigCompleteness;
   load: () => Promise<void>;
   patch: (p: Partial<ProxySettings>) => void;
   save: () => Promise<void>;
@@ -19,6 +27,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   saved: null,
   loading: true,
+  completeness: configCompleteness(DEFAULT_SETTINGS),
 
   async load() {
     try {
@@ -27,9 +36,19 @@ export const useSettings = create<SettingsState>((set, get) => ({
         settings: { ...DEFAULT_SETTINGS, ...s },
         saved: s,
         loading: false,
+        completeness: configCompleteness({ ...DEFAULT_SETTINGS, ...s }),
       });
     } catch {
-      set({ settings: DEFAULT_SETTINGS, saved: DEFAULT_SETTINGS, loading: false });
+      set({
+        settings: DEFAULT_SETTINGS,
+        saved: DEFAULT_SETTINGS,
+        loading: false,
+        completeness: configCompleteness(DEFAULT_SETTINGS),
+      });
+      // 文件损坏才走到这里（文件缺失已由 Rust 端返回默认值）；浏览器预览环境静默
+      if (isTauri()) {
+        useUi.getState().toast("设置读取失败，已恢复默认配置", "error");
+      }
     }
   },
 
@@ -44,7 +63,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       ];
       const connChanged = connKeys.some((k) => s.settings[k] !== next[k]);
       if (connChanged) useProxy.setState({ health: null });
-      return { settings: next };
+      return { settings: next, completeness: configCompleteness(next) };
     }),
 
   async save() {
@@ -58,7 +77,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
     const { settings } = get();
     if (settings.prefIp === trimmed) return true;
     const next = { ...settings, prefIp: trimmed };
-    set({ settings: next });
+    set({ settings: next, completeness: configCompleteness(next) });
     try {
       await api.saveSettings(next);
       set({ saved: next });

@@ -1,6 +1,6 @@
 // lib/src/proxy/tls.rs
 // MITM TLS：本地生成自签 CA，按 SNI 懒签发各域名叶子证书（ECDSA P-256）。
-// CA 持久化在 ca_dir/（ca.crt.pem + ca.key.pem），用户需手动将其导入系统信任区。
+// CA 持久化在 ca_dir/（ca.crt.pem + ca.key.enc），用户需手动将 ca.crt.pem 导入系统信任区。
 // ALPN 仅协商 http/1.1（隧道内不支持 h2）。
 
 use anyhow::{Context, Result, anyhow};
@@ -24,6 +24,9 @@ use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use crate::aead::{Aes256GcmSiv, Cipher};
+
+
 /// 叶子证书缓存容量上限（moka 精确维护，非软上限）
 const LEAF_CACHE_MAX: u64 = 256;
 
@@ -43,6 +46,8 @@ pub struct TlsManager {
     ca: Arc<Ca>,
     leaf_cache: Arc<LeafCache>,
     crypto_provider: Arc<CryptoProvider>,
+    /// 本次 init 是否因 CA 加载失败（解密失败/文件损坏）而自动重建
+    rebuilt: bool,
 }
 
 struct Ca {
@@ -52,25 +57,35 @@ struct Ca {
 }
 
 impl TlsManager {
-    pub fn init(ca_dir: &Path) -> Result<Self> {
+    pub fn init(ca_dir: &Path, key_secret: &[u8; 32]) -> Result<Self> {
         std::fs::create_dir_all(ca_dir)
             .with_context(|| format!("failed to create ca_dir {}", ca_dir.display()))?;
 
         let cert_path = ca_dir.join("ca.crt.pem");
-        let key_path = ca_dir.join("ca.key.pem");
+        let key_path = ca_dir.join("ca.key.enc");
 
-        let (cert, key, cert_pem) = if cert_path.exists() && key_path.exists() {
-            let (cert, key) = load_ca(&cert_path, &key_path)?;
-            let cert_pem = cert.pem();
-            (cert, key, cert_pem)
+        let (cert, key, cert_pem, rebuilt) = if cert_path.exists() && key_path.exists() {
+            match load_ca(&cert_path, &key_path, key_secret) {
+                Ok((cert, key)) => {
+                    let cert_pem = cert.pem();
+                    (cert, key, cert_pem, false)
+                }
+                Err(e) => {
+                    // 解密失败（设备 uid 变化）或文件损坏：自动重建 CA。
+                    // CA 证书随之变化，用户需重新导入 ca.crt.pem 到系统信任区。
+                    eprintln!("CA key load failed ({e:#}); regenerating CA");
+                    remove_ca_files(&cert_path, &key_path, ca_dir);
+                    let (cert, key, cert_pem) =
+                        generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
+                    (cert, key, cert_pem, true)
+                }
+            }
         } else {
-            let (cert, key) = generate_ca()?;
-            let cert_pem = cert.pem();
-            std::fs::write(&cert_path, &cert_pem)
-                .with_context(|| format!("failed to write {}", cert_path.display()))?;
-            write_key_file(&key_path, &key.serialize_pem())
-                .with_context(|| format!("failed to write {}", key_path.display()))?;
-            (cert, key, cert_pem)
+            // 首次运行 / 旧版明文格式迁移（只有 ca.crt.pem + ca.key.pem）：清理残留后重建
+            remove_ca_files(&cert_path, &key_path, ca_dir);
+            let (cert, key, cert_pem) =
+                generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
+            (cert, key, cert_pem, false)
         };
 
         let ca = Arc::new(Ca {
@@ -85,7 +100,13 @@ impl TlsManager {
             ca,
             leaf_cache,
             crypto_provider,
+            rebuilt,
         })
+    }
+
+    /// 本次 init 是否自动重建了 CA（CA 证书已变化，需重新导入信任区）
+    pub fn rebuilt(&self) -> bool {
+        self.rebuilt
     }
 
     /// CA 证书 PEM 内容
@@ -107,9 +128,9 @@ impl TlsManager {
             HANDSHAKE_TIMEOUT,
             LazyConfigAcceptor::new(Acceptor::default(), socket),
         )
-        .await
-        .map_err(|_| anyhow!("timed out waiting for ClientHello"))?
-        .map_err(|e| anyhow!("TLS pre-handshake (read ClientHello) failed: {e}"))?;
+            .await
+            .map_err(|_| anyhow!("timed out waiting for ClientHello"))?
+            .map_err(|e| anyhow!("TLS pre-handshake (read ClientHello) failed: {e}"))?;
 
         let sni = handshake.client_hello().server_name().map(str::to_string);
 
@@ -137,9 +158,9 @@ impl TlsManager {
             HANDSHAKE_TIMEOUT,
             handshake.into_stream(Arc::new(server_config)),
         )
-        .await
-        .map_err(|_| anyhow!("TLS handshake timed out for host {host:?}"))?
-        .map_err(|e| anyhow!("TLS handshake failed for host {host:?}: {e}"))
+            .await
+            .map_err(|_| anyhow!("TLS handshake timed out for host {host:?}"))?
+            .map_err(|e| anyhow!("TLS handshake failed for host {host:?}: {e}"))
     }
 }
 
@@ -165,7 +186,7 @@ fn normalize_host(raw: &str) -> String {
 // ─── CA 生成 / 加载 ───────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn write_key_file(path: &Path, pem: &str) -> Result<()> {
+fn write_key_file(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -175,13 +196,13 @@ fn write_key_file(path: &Path, pem: &str) -> Result<()> {
         .truncate(true)
         .mode(0o600)
         .open(path)?;
-    f.write_all(pem.as_bytes())?;
+    f.write_all(data)?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn write_key_file(path: &Path, pem: &str) -> Result<()> {
-    std::fs::write(path, pem)?;
+fn write_key_file(path: &Path, data: &[u8]) -> Result<()> {
+    std::fs::write(path, data)?;
     Ok(())
 }
 
@@ -206,11 +227,43 @@ fn generate_ca() -> Result<(Certificate, KeyPair)> {
     Ok((cert, key))
 }
 
-fn load_ca(cert_path: &Path, key_path: &Path) -> Result<(Certificate, KeyPair)> {
+/// 生成 CA 并持久化（证书明文 + 密钥加密），供首次创建与自动重建共用。
+fn generate_and_persist_ca(
+    cert_path: &Path,
+    key_path: &Path,
+    key_secret: &[u8; 32],
+) -> Result<(Certificate, KeyPair, String)> {
+    let (cert, key) = generate_ca()?;
+    let cert_pem = cert.pem();
+    std::fs::write(cert_path, &cert_pem)
+        .with_context(|| format!("failed to write {}", cert_path.display()))?;
+
+    let encrypted_key = Aes256GcmSiv::encrypt(key.serialize_pem().as_bytes(), key_secret)
+        .context("failed to encrypt CA key")?;
+    write_key_file(key_path, &encrypted_key)
+        .with_context(|| format!("failed to write {}", key_path.display()))?;
+    Ok((cert, key, cert_pem))
+}
+
+/// 删除 CA 相关文件（含旧版明文 ca.key.pem 残留），供重建前清理。
+fn remove_ca_files(cert_path: &Path, key_path: &Path, ca_dir: &Path) {
+    let stale_plain = ca_dir.join("ca.key.pem");
+    for p in [cert_path, key_path, &stale_plain] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn load_ca(cert_path: &Path, key_path: &Path, secret: &[u8; 32]) -> Result<(Certificate, KeyPair)> {
     let cert_pem = std::fs::read_to_string(cert_path)
         .with_context(|| format!("failed to read {}", cert_path.display()))?;
-    let key_pem = std::fs::read_to_string(key_path)
+
+    let encrypted_key = std::fs::read(key_path)
         .with_context(|| format!("failed to read {}", key_path.display()))?;
+
+    let key_pem_bytes = Aes256GcmSiv::decrypt(&encrypted_key, secret)
+        .context("failed to decrypt CA key")?;
+    let key_pem = String::from_utf8(key_pem_bytes)
+        .context("CA key is not valid UTF-8 after decryption")?;
 
     let key = KeyPair::from_pem(&key_pem).map_err(|e| anyhow!("failed to parse CA key: {e}"))?;
     let params = CertificateParams::from_ca_cert_pem(&cert_pem)
@@ -313,11 +366,12 @@ mod tests {
     #[test]
     fn test_ca_init_persistent() {
         let dir = tmp_dir("persist");
-        let m1 = TlsManager::init(&dir).unwrap();
+        let secret = [0u8; 32];
+        let m1 = TlsManager::init(&dir, &secret).unwrap();
         let pem1 = m1.ca_cert_pem().to_string();
         assert!(pem1.contains("BEGIN CERTIFICATE"));
 
-        let m2 = TlsManager::init(&dir).unwrap();
+        let m2 = TlsManager::init(&dir, &secret).unwrap();
         assert_eq!(
             m1.ca.key.serialize_der(),
             m2.ca.key.serialize_der(),
@@ -342,8 +396,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tmp_dir("perm");
-        let _m = TlsManager::init(&dir).unwrap();
-        let key_path = dir.join("ca.key.pem");
+        let secret = [0u8; 32];
+        let _m = TlsManager::init(&dir, &secret).unwrap();
+        let key_path = dir.join("ca.key.enc");
         let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
         assert_eq!(
             mode & 0o777,
@@ -356,14 +411,15 @@ mod tests {
     #[test]
     fn test_leaf_has_dns_san() {
         let dir = tmp_dir("leaf");
-        let m = TlsManager::init(&dir).unwrap();
+        let secret = [0u8; 32];
+        let m = TlsManager::init(&dir, &secret).unwrap();
         let ck = m.leaf_cache.get_or_create("example.com", &m.ca).unwrap();
         assert!(!ck.cert.is_empty());
 
         let ck2 = m.leaf_cache.get_or_create("example.com", &m.ca).unwrap();
         assert!(Arc::ptr_eq(&ck, &ck2));
 
-        let m2 = TlsManager::init(&dir).unwrap();
+        let m2 = TlsManager::init(&dir, &secret).unwrap();
         let ck3 = m2.leaf_cache.get_or_create("example.com", &m2.ca).unwrap();
         assert!(!ck3.cert.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -372,7 +428,8 @@ mod tests {
     #[test]
     fn test_leaf_ip_san() {
         let dir = tmp_dir("ip");
-        let m = TlsManager::init(&dir).unwrap();
+        let secret = [0u8; 32];
+        let m = TlsManager::init(&dir, &secret).unwrap();
         let ck = m.leaf_cache.get_or_create("192.168.1.1", &m.ca).unwrap();
         assert!(!ck.cert.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -381,7 +438,8 @@ mod tests {
     #[test]
     fn test_leaf_params_san_correct() {
         let dir = tmp_dir("san");
-        let m = TlsManager::init(&dir).unwrap();
+        let secret = [0u8; 32];
+        let m = TlsManager::init(&dir, &secret).unwrap();
         let host = "api.example.com";
         let _ = m.leaf_cache.get_or_create(host, &m.ca).unwrap();
 
@@ -407,7 +465,8 @@ mod tests {
         use std::thread;
 
         let dir = tmp_dir("concurrent");
-        let m = Arc::new(TlsManager::init(&dir).unwrap());
+        let secret = [0u8; 32];
+        let m = Arc::new(TlsManager::init(&dir, &secret).unwrap());
 
         let handles: Vec<_> = (0..16)
             .map(|_| {
@@ -435,7 +494,8 @@ mod tests {
     #[test]
     fn test_cache_bounded_by_capacity() {
         let dir = tmp_dir("evict");
-        let m = TlsManager::init(&dir).unwrap();
+        let secret = [0u8; 32];
+        let m = TlsManager::init(&dir, &secret).unwrap();
 
         for i in 0..(LEAF_CACHE_MAX as usize + 50) {
             let host = format!("host{i}.example.com");
@@ -461,5 +521,61 @@ mod tests {
         assert_eq!(normalize_host("::1"), "::1");
         assert_eq!(normalize_host("192.168.1.1:8443"), "192.168.1.1");
         assert_eq!(normalize_host("192.168.1.1"), "192.168.1.1");
+    }
+
+    /// 密钥变化（模拟设备 uid 变更）→ 解密失败 → 自动重建 CA，且证书随之变化
+    #[test]
+    fn test_ca_auto_rebuild_on_secret_change() {
+        let dir = tmp_dir("rebuild");
+        let secret_a = [0x11u8; 32];
+        let secret_b = [0x22u8; 32];
+
+        let m1 = TlsManager::init(&dir, &secret_a).unwrap();
+        assert!(!m1.rebuilt(), "fresh CA must not be marked rebuilt");
+        let pem1 = m1.ca_cert_pem().to_string();
+
+        let m2 = TlsManager::init(&dir, &secret_b).unwrap();
+        assert!(m2.rebuilt(), "decrypt failure must trigger rebuild");
+        assert_ne!(
+            pem1,
+            m2.ca_cert_pem(),
+            "rebuilt CA cert must differ from the old one"
+        );
+
+        // 新密钥下再次 init：可正常加载，不再重建。
+        // 注意 load_ca 会用同一密钥重新签名证书，PEM 字节会变（ECDSA 随机签名），
+        // 因此以密钥与证书身份（subject）为准比较稳定性。
+        let m3 = TlsManager::init(&dir, &secret_b).unwrap();
+        assert!(!m3.rebuilt());
+        assert_eq!(
+            m2.ca.key.serialize_der(),
+            m3.ca.key.serialize_der(),
+            "CA key must be stable across loads"
+        );
+        assert_eq!(
+            m2.ca.cert.params().distinguished_name,
+            m3.ca.cert.params().distinguished_name,
+            "CA subject must be stable across loads"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版明文格式迁移：残留 ca.key.pem 被清理，新版生成 ca.key.enc
+    #[test]
+    fn test_ca_migration_cleans_legacy_plaintext_key() {
+        let dir = tmp_dir("migrate");
+        let secret = [0x33u8; 32];
+
+        // 模拟旧版安装：明文 ca.key.pem + ca.crt.pem
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca.key.pem"), "-----BEGIN PRIVATE KEY-----\nfake\n").unwrap();
+        std::fs::write(dir.join("ca.crt.pem"), "-----BEGIN CERTIFICATE-----\nfake\n").unwrap();
+
+        let m = TlsManager::init(&dir, &secret).unwrap();
+        assert!(!m.rebuilt(), "migration regeneration is not a rebuild");
+        assert!(!dir.join("ca.key.pem").exists(), "legacy plaintext key must be removed");
+        assert!(dir.join("ca.key.enc").exists(), "encrypted key must exist");
+        assert!(dir.join("ca.crt.pem").exists(), "CA cert must exist");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

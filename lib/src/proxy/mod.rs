@@ -1,49 +1,50 @@
 // lib/src/proxy/mod.rs
-// 客户端代理核心：
-//   本地 HTTP 代理监听 → 接收完整请求 → 归一化 → 压缩+AEAD 加密 → POST 到 CF Worker
-//   → 解析 SSE 流 → 解密解压 → 原样写回浏览器 socket（字节泵，无需解析响应）
-//   CONNECT(TLS) 走 MITM：本地 CA 签发叶子证书，隧道内透传 HTTP/1.1 请求。
-//   同一 TCP/TLS 连接上支持 HTTP Keep-Alive：只要客户端与“响应”双方都不
-//   显式要求关闭，就在同一连接上继续处理下一个请求。
 //
+// 本地 HTTP 代理核心（MITM TLS 在 tls.rs）：
+//   - 每个请求头只跑一次 httparse（HeaderPaser），method/path/raw 零拷贝复用；
+//   - 请求体按 HTTP 语义判定范围（Content-Length 计数 / chunked 四态扫描 /
+//     无 body），读完浏览器请求体立即以 EOS 完成 worker 请求体，再等待响应；
+//     （Cloudflare edge 在请求体未完成前不会交付响应，"等响应再 EOS"会死锁）
+//   - 明文 HTTP / CONNECT 隧道内 HTTPS 统一为泛型 serve() 循环（编译期单态化两份）；
+//   - keep-alive：收到 EOS 且客户端未断开即可复用连接。
 
 use anyhow::{anyhow, bail, Context, Result};
+use bytes::{Buf, Bytes, BytesMut};
 use futures_util::StreamExt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::RwLock;
 use std::sync::Arc;
-use std::time::{SystemTime};
+use std::sync::RwLock;
+use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{timeout, timeout_at, Duration, Instant};
 
 use crate::algo::{decode_chunk, encode_chunk};
-use crate::base::{Base64, Encoder};
-use crate::http::{http_parse_req, url_parse, HttpReqCache, UrlBuilder, MAX_HEADERS as HTTP_MAX_HEADERS};
+use crate::frames::{make_frame, Frame, FrameCache};
+use crate::http::{split_host_port, url_parse, HeaderPaser, ReqHeader, UrlBuilder};
 
-mod sse;
 mod tls;
 
 pub use crate::tool::{gen_auth_token, xoroshiro128};
 pub use tls::TlsManager;
 
 /// 与 worker 建立连接的超时
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// 等待浏览器发来第一个请求的超时（固定 deadline，不因为收到部分字节而被重置）
-const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(96);
 /// CONNECT 握手后等待隧道内首个请求的超时
 const TLS_FIRST_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// 与浏览器完成 TLS(MITM) 握手允许的最长时间
 const TLS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Keep-Alive 场景下，等待同一连接上下一个请求到达的空闲超时
-const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
-/// 单个 SSE chunk 之间允许的最大间隔（超过视为假死连接）
-const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const KEEP_ALIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(96);
+/// 单个帧之间允许的最大间隔（超过视为假死连接）
+const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(96);
+/// 请求 body 泵送阶段：两次成功读取之间的最大间隔（上传卡死兜底）
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(96);
 
-/// 嗅探响应头以判断 Keep-Alive 意图时，最多缓存的字节数
-const HEADER_SNIFF_LIMIT: usize = 1024 * 1024;
 /// 单次读取缓冲大小
 const READ_BUF: usize = 16 * 1024;
 
@@ -55,6 +56,8 @@ pub struct ProxyConfig {
     pub use_https: bool,
     pub auth_key: String,
     pub ca_dir: PathBuf,
+    /// CA 私钥保护密钥（32B，由设备 uid + 随机盐派生，见 derive_ca_key_secret）
+    pub ca_key_secret: [u8; 32],
     pub compressor: ProxyCompressor,
     pub aead: ProxyAead,
     /// 可选的优选 IP
@@ -65,6 +68,7 @@ pub struct ProxyConfig {
 /// 客户端/服务端共用，此处仅重新导出保持兼容。
 pub use crate::algo::{ProxyAead, ProxyAlgo, ProxyCompressor};
 use crate::tool::derive_keys;
+
 
 struct Shared {
     worker_url: String,
@@ -78,9 +82,6 @@ struct Shared {
     tls: Arc<TlsManager>,
 }
 
-
-
-
 pub struct Proxy {
     cfg: ProxyConfig,
     shared: Arc<Shared>,
@@ -91,6 +92,15 @@ impl Proxy {
     pub fn new(mut cfg: ProxyConfig) -> Result<Self> {
         anyhow::ensure!(!cfg.auth_key.is_empty(), "auth_key must not be empty");
         cfg.domain = cfg.domain.trim().to_string();
+
+        // domain 不允许携带端口：worker 侧密钥派生与 token 校验均基于纯 host（env secret
+        // "domain"），带端口会导致两端 token 不匹配（全链路 401）。
+        let (_host, port) = split_host_port(&cfg.domain).context("invalid domain")?;
+        anyhow::ensure!(
+            port.is_none(),
+            "domain must not contain a port, got {:?}",
+            cfg.domain
+        );
 
         let worker_url = UrlBuilder::new()
             .https(cfg.use_https)
@@ -110,7 +120,7 @@ impl Proxy {
             .http2_initial_connection_window_size(16 * 1024 * 1024)
             .tcp_nodelay(true)
             .build()?;
-        let tls = Arc::new(TlsManager::init(&cfg.ca_dir)?);
+        let tls = Arc::new(TlsManager::init(&cfg.ca_dir, &cfg.ca_key_secret)?);
 
         let initial_algo = ProxyAlgo::new(cfg.compressor, cfg.aead);
 
@@ -179,6 +189,7 @@ impl Proxy {
         self.task = Some(task);
         Ok(port)
     }
+
     pub async fn check_availability(&self) -> Result<ProxyCheck> {
         if !self.is_running() {
             bail!("proxy is not running (call start() first)");
@@ -370,67 +381,30 @@ pub async fn check_proxy_availability(port: u16) -> Result<ProxyCheck> {
     bail!("All 6 concurrent proxy checks failed")
 }
 
-struct ParsedRequest {
-    /// 原始请求字节，原样转发给 worker
-    raw: Vec<u8>,
-    method: String,
-    /// origin-form 下是路径；CONNECT 下是 "host:port" authority
-    path: String,
-    keep_alive: bool,
-}
+// ─── 头解析 ────────────────────────────────────────────────────────────────
 
-impl ParsedRequest {
-    /// 解析一段完整的请求。full_url 仅在服务端需要时经
-    /// `HttpReq::full_url(protocol)` 按需构建，客户端不构造。
-    fn parse(raw: Vec<u8>) -> Result<Self> {
-        let req = http_parse_req(&raw).context("failed to parse request")?;
-
-        let method = req.method.to_string();
-        let path = req.path.to_string();
-        let keep_alive = connection_keep_alive(
-            req.version,
-            req.headers
-                .iter()
-                .map(|(name, value)| (*name, value.as_bytes())),
-        );
-        println!("method: {method}, url: {path} keep_alive: {keep_alive}");
-
-        Ok(Self {
-            raw,
-            method,
-            path,
-            keep_alive,
-        })
-    }
-
-    fn is_connect(&self) -> bool {
-        self.method.eq_ignore_ascii_case("CONNECT")
-    }
-}
-
-// ─── 连接处理 ─────────────────────────────────────────────────────────────────
-
-/// 从 stream 中读取下一个请求的结果
-enum ReadOutcome {
-    Request(Vec<u8>),
-    /// 对端在完整请求到达前正常关闭了连接（EOF，含 TLS 无 close_notify 的场景）
+/// 读取下一个请求头的结果
+enum HeadOutcome {
+    /// 请求头已收全（body 字节在 remaining 中，由事务处理阶段按语义消费/归还）
+    Head(ReqHeader, BytesMut),
+    /// 对端在完整请求头到达前正常关闭了连接（EOF，含 TLS 无 close_notify 的场景）
     Closed,
-    /// 直到 deadline 都没有等到完整请求
+    /// 直到 deadline 都没有等到完整请求头
     TimedOut,
 }
 
-/// 从 stream 中持续读取数据，直到从 cache 中弹出一个完整请求、
+/// 从 stream 中持续读取数据，直到 parser 弹出一个完整请求头、
 /// 对端正常关闭连接，或者到达 deadline。
-async fn read_request<S>(
+async fn read_next_header<S>(
     stream: &mut S,
-    cache: &mut HttpReqCache,
+    parser: &mut HeaderPaser,
     deadline: Instant,
-) -> Result<ReadOutcome>
+) -> Result<HeadOutcome>
 where
     S: AsyncRead + Unpin,
 {
-    if let Some(req) = cache.pop()? {
-        return Ok(ReadOutcome::Request(req));
+    if let Some((head, remaining)) = parser.try_pop()? {
+        return Ok(HeadOutcome::Head(head, remaining));
     }
 
     loop {
@@ -438,170 +412,449 @@ where
         let n = match timeout_at(deadline, stream.read(&mut buf)).await {
             Ok(Ok(n)) => n,
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(ReadOutcome::Closed);
+                return Ok(HeadOutcome::Closed);
             }
             Ok(Err(e)) => return Err(e).context("read failed"),
-            Err(_) => return Ok(ReadOutcome::TimedOut),
+            Err(_) => return Ok(HeadOutcome::TimedOut),
         };
         if n == 0 {
-            return Ok(ReadOutcome::Closed);
+            return Ok(HeadOutcome::Closed);
         }
-        cache.push(&buf[..n])?;
-        if let Some(req) = cache.pop()? {
-            return Ok(ReadOutcome::Request(req));
+        parser.push(&buf[..n])?;
+        if let Some((head, remaining)) = parser.try_pop()? {
+            return Ok(HeadOutcome::Head(head, remaining));
         }
     }
 }
 
+// ─── 连接处理 ───────────────────────────────────────────────────────────────
+
+/// 连接入口：读首个请求头，按是否 CONNECT 决定本地 TLS(MITM) 握手，
+/// 之后统一进入 keep-alive 转发循环（泛型单态化：TcpStream / TlsStream<TcpStream>）。
 async fn handle_connection(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
-    let mut cache = HttpReqCache::new();
+    let mut parser = HeaderPaser::new();
     let deadline = Instant::now() + FIRST_REQUEST_TIMEOUT;
-
-    let first_raw = match read_request(&mut socket, &mut cache, deadline).await? {
-        ReadOutcome::Request(r) => r,
-        ReadOutcome::Closed => return Ok(()), // 浏览器提前断开
-        ReadOutcome::TimedOut => bail!("timed out waiting for first request"),
+    let (header, remaining) = match read_next_header(&mut socket, &mut parser, deadline).await? {
+        HeadOutcome::Head(h, r) => (h, r),
+        HeadOutcome::Closed => return Ok(()),
+        HeadOutcome::TimedOut => bail!("timed out waiting for first request"),
     };
 
-    let parsed = ParsedRequest::parse(first_raw)?;
+    if header.is_connect() {
+        let authority = header.path.trim();
+        anyhow::ensure!(!authority.is_empty(), "CONNECT without authority");
+        let (host, _port) = split_host_port(authority).context("invalid CONNECT authority")?;
+        anyhow::ensure!(!host.is_empty(), "CONNECT without authority");
 
-    if parsed.is_connect() {
-        handle_connect(socket, parsed, shared).await
+        socket
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        socket.flush().await?;
+
+        let mut tls_stream = timeout(TLS_ACCEPT_TIMEOUT, shared.tls.accept(socket, Some(host)))
+            .await
+            .context("timed out establishing TLS with client")?
+            .context("TLS handshake failed")?;
+
+        // 隧道内重新解析真实请求头（与 TCP 阶段的 over-read 无关）
+        let mut tls_parser = HeaderPaser::new();
+        let deadline = Instant::now() + TLS_FIRST_REQUEST_TIMEOUT;
+        let (h2, r2) = match read_next_header(&mut tls_stream, &mut tls_parser, deadline).await? {
+            HeadOutcome::Head(h, r) => (h, r),
+            HeadOutcome::Closed => return Ok(()),
+            HeadOutcome::TimedOut => bail!("timed out waiting for tunneled request"),
+        };
+
+        serve(tls_stream, tls_parser, h2, r2, true, shared).await
     } else {
-        serve_http(socket, cache, parsed, false, shared).await
+        serve(socket, parser, header, remaining, false, shared).await
     }
 }
 
-/// CONNECT：在本地完成 TLS 握手（MITM），隧道内解析并转发 HTTP/1.1 请求。
-/// 隧道内同样支持 Keep-Alive（同一 TLS 连接上串行处理多个 HTTPS 请求）。
-async fn handle_connect(
-    mut socket: TcpStream,
-    connect_req: ParsedRequest,
-    shared: Arc<Shared>,
-) -> Result<()> {
-    let authority = connect_req.path.trim().to_string();
-    if authority.is_empty() {
-        bail!("CONNECT without authority");
-    }
-    let host = authority
-        .split(':')
-        .next()
-        .unwrap_or(&authority)
-        .to_string();
-    if host.is_empty() {
-        bail!("CONNECT without authority");
-    }
-
-    socket
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
-    socket.flush().await?;
-
-    let mut tls_stream = timeout(TLS_ACCEPT_TIMEOUT, shared.tls.accept(socket, Some(&host)))
-        .await
-        .context("timed out establishing TLS with client")?
-        .context("TLS handshake failed")?;
-
-    let mut cache = HttpReqCache::new();
-    let deadline = Instant::now() + TLS_FIRST_REQUEST_TIMEOUT;
-    let first_raw = match read_request(&mut tls_stream, &mut cache, deadline).await? {
-        ReadOutcome::Request(r) => r,
-        ReadOutcome::Closed => return Ok(()),
-        ReadOutcome::TimedOut => bail!("timed out waiting for tunneled request"),
-    };
-
-    let parsed = ParsedRequest::parse(first_raw)?;
-    serve_http(tls_stream, cache, parsed, true, shared).await
-}
-
-/// 支持 Keep-Alive 的请求处理循环：在同一连接上串行处理多个请求，
-/// 直到请求方或响应方任一方显式要求关闭、发生错误、达到请求数上限，
-/// 或空闲超时。
-async fn serve_http<S>(
+/// 统一的 keep-alive 循环：明文 HTTP 用 TcpStream 单态化一份，
+/// 隧道内 HTTPS 用 TlsStream 单态化另一份。CONNECT 不可能在此出现。
+async fn serve<S>(
     mut stream: S,
-    mut cache: HttpReqCache,
-    mut parsed: ParsedRequest,
+    mut parser: HeaderPaser,
+    mut header: ReqHeader,
+    mut remaining: BytesMut,
     is_https: bool,
     shared: Arc<Shared>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    loop {
+        if header.is_connect() {
+            bail!("unexpected CONNECT within an established stream");
+        }
 
-    let result: Result<()> = loop {
-
-
-        let want_keep_alive = parsed.keep_alive;
-
-        let keep_alive = match handle_request(
-            &mut stream,
-            &mut cache,
-            &parsed.raw,
-            is_https,
-            &shared,
-            want_keep_alive,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => break Err(e),
-        };
+        let keep_alive = handle_one_request(&mut stream, &mut parser, &header, remaining, is_https, &shared).await?;
 
         if !keep_alive {
-            break Ok(());
+            break;
         }
 
         let deadline = Instant::now() + KEEP_ALIVE_IDLE_TIMEOUT;
-        match read_request(&mut stream, &mut cache, deadline).await {
-            Ok(ReadOutcome::Request(r)) => match ParsedRequest::parse(r) {
-                Ok(p) => parsed = p,
-                Err(e) => break Err(e),
-            },
-            Ok(ReadOutcome::Closed) | Ok(ReadOutcome::TimedOut) => break Ok(()),
-            Err(e) => break Err(e),
+        match read_next_header(&mut stream, &mut parser, deadline).await? {
+            HeadOutcome::Head(h, r) => {
+                header = h;
+                remaining = r;
+            }
+            HeadOutcome::Closed | HeadOutcome::TimedOut => break,
         }
-    };
+    }
 
     let _ = stream.shutdown().await;
-    result
+    Ok(())
 }
 
-/// 转发单个请求：打包 → POST worker → SSE 解包 → 字节写回浏览器。
-/// 返回值表示这条连接是否应当继续保持（供下一个请求复用）。
+/// 单次原始读取的结果
+enum RawRead {
+    Data(Bytes),
+    Eof,
+    TimedOut,
+}
+
+async fn read_raw<S: AsyncRead + Unpin>(stream: &mut S, idle: Duration) -> Result<RawRead> {
+    let mut buf = [0u8; READ_BUF];
+    match timeout(idle, stream.read(&mut buf)).await {
+        Ok(Ok(0)) => Ok(RawRead::Eof),
+        Ok(Ok(n)) => Ok(RawRead::Data(Bytes::copy_from_slice(&buf[..n]))),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(RawRead::Eof),
+        Ok(Err(e)) => Err(e).context("read failed"),
+        Err(_) => Ok(RawRead::TimedOut),
+    }
+}
+
+/// chunk 分块行 / trailer 行长度上限（防御畸形输入）
+const CHUNK_LINE_MAX: usize = 64 * 1024;
+
+/// 请求体范围判定：驱动"何时完成请求体（EOS）"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyExtent {
+    /// 无请求体（含 Content-Length: 0）
+    NoBody,
+    /// Content-Length 计数的定长 body
+    ContentLength(u64),
+    /// Transfer-Encoding: chunked（原始字节透传，扫描分帧结束点）
+    Chunked,
+}
+
+/// 从已解析请求头判定请求体范围（遵循 RFC 9112）：
+/// Transfer-Encoding 覆盖 Content-Length；仅 chunked 定义分帧。
+fn body_extent(headers: &[(String, String)]) -> Result<BodyExtent> {
+    let mut cl: Option<u64> = None;
+    let mut chunked = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-length") {
+            let v = v.trim();
+            let n: u64 = v
+                .parse()
+                .with_context(|| format!("invalid content-length: {v:?}"))?;
+            if cl.is_some() {
+                bail!("duplicate content-length headers");
+            }
+            cl = Some(n);
+        } else if k.eq_ignore_ascii_case("transfer-encoding")
+            && v.split(',').any(|t| t.trim().eq_ignore_ascii_case("chunked"))
+        {
+            chunked = true;
+        }
+    }
+    if chunked {
+        return Ok(BodyExtent::Chunked);
+    }
+    Ok(match cl {
+        Some(0) | None => BodyExtent::NoBody,
+        Some(n) => BodyExtent::ContentLength(n),
+    })
+}
+
+/// 拆分头部超读字节：返回 (属于本请求 body 的前缀长度, 超出部分长度)。
+/// 无 body 请求的超读字节全部是下一请求（keep-alive 流水线），须归还 parser。
+fn split_body_prefix(remaining: &[u8], extent: &BodyExtent) -> (usize, usize) {
+    match extent {
+        BodyExtent::NoBody => (0, remaining.len()),
+        BodyExtent::ContentLength(n) => {
+            let take = (remaining.len() as u64).min(*n) as usize;
+            (take, remaining.len() - take)
+        }
+        BodyExtent::Chunked => (remaining.len(), 0),
+    }
+}
+
+/// 泵送阶段 body 进度跟踪：Content-Length 计数 或 chunked 结束扫描。
+enum PumpTracker {
+    ContentLength(u64),
+    Chunked(ChunkedEndScanner),
+}
+
+impl PumpTracker {
+    fn new(extent: &BodyExtent) -> Option<Self> {
+        match extent {
+            BodyExtent::NoBody => None,
+            BodyExtent::ContentLength(n) => Some(Self::ContentLength(*n)),
+            BodyExtent::Chunked => Some(Self::Chunked(ChunkedEndScanner::new())),
+        }
+    }
+
+    /// 处理一段字节：返回 Some(take) 表示请求体已结束，本段前 take 字节属于
+    /// body（其后为下一请求字节）；None 表示尚未结束，本段全部属于 body。
+    fn push(&mut self, data: &[u8]) -> Result<Option<usize>> {
+        match self {
+            Self::ContentLength(left) => {
+                let take = (*left as usize).min(data.len());
+                *left -= take as u64;
+                Ok(if *left == 0 { Some(take) } else { None })
+            }
+            Self::Chunked(scanner) => scanner.feed(data),
+        }
+    }
+}
+
+/// chunked 结束扫描状态
+enum ChunkState {
+    /// 等待一行 chunk-size（可带扩展）
+    ExpectSizeLine,
+    /// 跳过 chunk 数据（按声明长度计数）
+    SkipData,
+    /// 等待 chunk 数据后的 CRLF
+    ExpectChunkCrlf,
+    /// 0 长度块之后：逐行扫 trailer 区，首个空行即结束
+    TailAfterZero,
+}
+
+/// chunked 原始字节流的结束检测状态机。
+/// 只追踪分帧边界，不解码 chunk 内容：数据按字节精确跳过，
+/// 因此 payload 内出现 "0\r\n\r\n" 之类的序列不会被误判。
+/// 结束点包含末尾的 "0\r\n\r\n"（兼容 trailer 区），之后字节属下一请求。
+struct ChunkedEndScanner {
+    state: ChunkState,
+    buf: BytesMut,
+    /// 已确认属于 body 且已消费的字节数（整个流内）
+    consumed: u64,
+    skip_remaining: u64,
+    done: bool,
+}
+
+impl ChunkedEndScanner {
+    fn new() -> Self {
+        Self {
+            state: ChunkState::ExpectSizeLine,
+            buf: BytesMut::with_capacity(256),
+            consumed: 0,
+            skip_remaining: 0,
+            done: false,
+        }
+    }
+
+    /// 喂入一段原始字节（调用方应把同一段字节转发给 worker）。
+    /// 返回 Some(take)：请求体已结束，本段前 take 字节属于 body，
+    /// 本段 take.. 之后为下一请求字节（调用方归还 parser）；
+    /// None：请求体未结束，本段全部属于 body。
+    fn feed(&mut self, chunk: &[u8]) -> Result<Option<usize>> {
+        if self.done {
+            return Ok(Some(0));
+        }
+        let base = self.consumed;
+        self.buf.extend_from_slice(chunk);
+
+        loop {
+            match self.state {
+                ChunkState::ExpectSizeLine => match find_bytes(&self.buf, b"\r\n") {
+                    Some(p) => {
+                        let size = parse_chunk_size(&self.buf[..p])?;
+                        let line_len = p + 2;
+                        self.buf.advance(line_len);
+                        self.consumed += line_len as u64;
+                        self.state = if size == 0 {
+                            ChunkState::TailAfterZero
+                        } else {
+                            self.skip_remaining = size;
+                            ChunkState::SkipData
+                        };
+                    }
+                    None => {
+                        if self.buf.len() > CHUNK_LINE_MAX {
+                            bail!("malformed chunked body: chunk size line too long");
+                        }
+                        return Ok(None);
+                    }
+                },
+                ChunkState::SkipData => {
+                    let skip = self.skip_remaining.min(self.buf.len() as u64) as usize;
+                    if skip > 0 {
+                        self.buf.advance(skip);
+                        self.consumed += skip as u64;
+                        self.skip_remaining -= skip as u64;
+                    }
+                    if self.skip_remaining == 0 {
+                        self.state = ChunkState::ExpectChunkCrlf;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                ChunkState::ExpectChunkCrlf => {
+                    if self.buf.len() >= 2 {
+                        if &self.buf[..2] == b"\r\n" {
+                            self.buf.advance(2);
+                            self.consumed += 2;
+                            self.state = ChunkState::ExpectSizeLine;
+                        } else {
+                            bail!("malformed chunked body: missing CRLF after chunk data");
+                        }
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                ChunkState::TailAfterZero => {
+                    // 0 长度块之后：trailer 区逐行扫描，首个空行（直接 CRLF）即结束
+                    if self.buf.len() >= 2 && &self.buf[..2] == b"\r\n" {
+                        let end = self.consumed + 2;
+                        self.done = true;
+                        let rel = (end.saturating_sub(base) as usize).min(chunk.len());
+                        return Ok(Some(rel));
+                    }
+                    match find_bytes(&self.buf, b"\r\n") {
+                        Some(p) => {
+                            let line_len = p + 2;
+                            if line_len > CHUNK_LINE_MAX {
+                                bail!("malformed chunked body: trailer too long");
+                            }
+                            self.buf.advance(line_len);
+                            self.consumed += line_len as u64;
+                        }
+                        None => {
+                            if self.buf.len() > CHUNK_LINE_MAX {
+                                bail!("malformed chunked body: trailer too long");
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 子串查找（无内存分配）
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// 解析 chunk-size 行（允许 chunk 扩展 "1a;ext=x\r\n"）
+fn parse_chunk_size(line: &[u8]) -> Result<u64> {
+    let hex_len = line
+        .iter()
+        .position(|&b| !b.is_ascii_hexdigit())
+        .unwrap_or(line.len());
+    if hex_len == 0 {
+        bail!("malformed chunked body: empty chunk size line");
+    }
+    let hex_str = std::str::from_utf8(&line[..hex_len])
+        .map_err(|_| anyhow!("malformed chunked body: invalid chunk size"))?;
+    u64::from_str_radix(hex_str, 16).map_err(|_| anyhow!("malformed chunked body: invalid chunk size"))
+}
+
+/// 转发一段字节给 worker（带 96s 上限，防上传卡死）
+async fn send_to_worker(tx: &tokio::sync::mpsc::Sender<Bytes>, data: &[u8]) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if timeout(BODY_IDLE_TIMEOUT, tx.send(Bytes::copy_from_slice(data)))
+        .await
+        .map_err(|_| anyhow!("worker upload stalled"))?
+        .is_err()
+    {
+        bail!("worker body channel closed unexpectedly");
+    }
+    Ok(())
+}
+
+/// 处理一段属于请求体的字节：转发给 worker 并推进进度。
+/// 返回 Some(take)：请求体已结束，本段前 take 字节属于 body（其后归 parser）；
+/// None：尚未结束，本段全部属于 body。
+async fn pump_chunk(
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+    tracker: &mut PumpTracker,
+    data: &[u8],
+) -> Result<Option<usize>> {
+    match tracker.push(data)? {
+        Some(take) => {
+            send_to_worker(tx, &data[..take]).await?;
+            Ok(Some(take))
+        }
+        None => {
+            send_to_worker(tx, data).await?;
+            Ok(None)
+        }
+    }
+}
+
+/// 转发单个请求：按 HTTP 语义判定请求体范围，读完浏览器请求体后立即以
+/// EOS 完成 worker 请求体，再等待响应并回传。
+/// Cloudflare edge 在请求体未完成前不会交付响应，因此不能"等响应再 EOS"。
+///   - 上行：头帧（raw + https 标志）→ body 帧（头部超读字节 + 浏览器流）→ EOS；
+///   - 请求体边界：Content-Length 按计数、chunked 按四态扫描（原始字节透传），
+///     无 body 请求立即 EOS；超读字节中不属于 body 的部分归还 parser
+///     （keep-alive 流水线）；浏览器中途 EOF 照发 EOS（截断，worker 侧报错）；
+///   - 下行：响应帧流解包写回浏览器。
 ///
-/// `cache` 与 `serve_http` 中用于读取“下一个请求”的缓冲区是同一个：
-/// 转发响应期间顺带探测浏览器是否已断开时（`browser_closed`），任何提前
-/// 到达的字节都会被追加进这个 `cache`，而不会丢失。
-async fn handle_request<S>(
+/// 返回是否可复用连接（keep-alive）：relay 成功且客户端未断开即可复用。
+async fn handle_one_request<S>(
     stream: &mut S,
-    cache: &mut HttpReqCache,
-    req_bytes: &[u8],
+    parser: &mut HeaderPaser,
+    header: &ReqHeader,
+    mut remaining: BytesMut,
     is_https: bool,
     shared: &Arc<Shared>,
-    want_keep_alive: bool,
 ) -> Result<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut payload = req_bytes.to_vec();
-    payload.push(if is_https { 1 } else { 0 });
-
-    // 每次请求读取当前算法（支持热切换）；加密/解密必须用同一组合
     let algo = *shared
         .algo
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // 与服务端对称：先压缩后加密（共享管线，见 crate::algo）
-    let body = encode_chunk(
-        &payload,
-        algo.compressor,
-        algo.aead,
-        &shared.key16,
-        &shared.key32,
-    )?;
+    // ---------- 请求体范围判定 ----------
+    let extent = body_extent(&header.headers)?;
 
-    // 优选 IP：设置了则用带 resolve 的专用 client，否则回退 DNS
+    // ---------- 首帧：raw 头部 + https 标志（零重建） ----------
+    let mut head_frame = BytesMut::with_capacity(header.raw.len() + 1);
+    head_frame.extend_from_slice(&header.raw);
+    head_frame.extend_from_slice(&[if is_https { 1 } else { 0 }]);
+    let head_frame = head_frame.freeze();
+
+    // ---------- 超读字节拆分：body 前缀经通道转发，其余归还 parser ----------
+    let (prefix_len, _push_len) = split_body_prefix(&remaining, &extent);
+    let body_prefix = remaining.split_to(prefix_len).freeze();
+    if !remaining.is_empty() {
+        parser.push(&remaining)?;
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    let key16 = shared.key16;
+    let key32 = shared.key32;
+    let body_stream = async_stream::stream! {
+        match enc_frame(&head_frame, algo, &key16, &key32) {
+            Ok(frame) => yield Ok(frame),
+            Err(e) => { yield Err(e); return; }
+        }
+        while let Some(bytes) = rx.recv().await {
+            if bytes.is_empty() {
+                continue;
+            }
+            match enc_frame(&bytes, algo, &key16, &key32) {
+                Ok(frame) => yield Ok(frame),
+                Err(e) => { yield Err(e); return; }
+            }
+        }
+        // 零长帧 = EOS，请求体结束
+        yield Ok(Bytes::from(make_frame(b"")));
+    };
+
     let pref_client = shared
         .pref_client
         .read()
@@ -614,20 +867,86 @@ where
         .build()
         .context("build worker request url failed")?;
 
-    let resp = pref_client
+    let resp_fut = pref_client
         .as_ref()
         .unwrap_or(&shared.client)
         .post(url)
         .bearer_auth(gen_auth_token(&shared.token_base))
         .header("Content-Type", "application/octet-stream")
-        .body(body)
-        .send()
-        .await
-        .context("worker request failed")?;
+        .body(reqwest::Body::wrap_stream(body_stream))
+        .send();
+    tokio::pin!(resp_fut);
+
+    // ---------- 泵送阶段：读完浏览器请求体即完成（EOS），再等响应 ----------
+    // 响应在请求体未完成前不会到达（edge 契约），因此不再"等响应才发 EOS"。
+    // select 中仍轮询 resp_fut：驱动 body_stream（消费通道，防背压）的同时
+    // 及时上报传输层错误；本地 dev（无 edge）下响应可能提前到达，暂存即可。
+    let mut tracker = PumpTracker::new(&extent);
+    let mut early_resp: Option<reqwest::Response> = None;
+    let mut client_eof = false;
+    let mut body_done = false;
+
+    if !body_prefix.is_empty() {
+        if let Some(take) = pump_chunk(&tx, tracker.as_mut().unwrap(), &body_prefix).await? {
+            if take < body_prefix.len() {
+                parser.push(&body_prefix[take..])?;
+            }
+            body_done = true;
+        }
+    }
+
+    if tracker.is_some() && !body_done {
+        loop {
+            tokio::select! {
+                biased;
+                r = read_raw(stream, BODY_IDLE_TIMEOUT) => {
+                    match r? {
+                        RawRead::Data(data) => {
+                            match pump_chunk(&tx, tracker.as_mut().unwrap(), &data).await? {
+                                Some(take) => {
+                                    if take < data.len() {
+                                        parser.push(&data[take..])?;
+                                    }
+                                    break;
+                                }
+                                None => {}
+                            }
+                        }
+                        RawRead::Eof => {
+                            client_eof = true;
+                            break;
+                        }
+                        RawRead::TimedOut => bail!("browser body idle timeout"),
+                    }
+                }
+                res = &mut resp_fut, if early_resp.is_none() => {
+                    match res {
+                        Ok(r) => early_resp = Some(r),
+                        Err(e) => return Err(anyhow::Error::new(e).context("worker request failed")),
+                    }
+                }
+            }
+        }
+    }
+    drop(tx); // 通知 worker 侧请求体结束（EOS 帧）
+
+    // ---------- 响应阶段：等待 worker 响应并回传 ----------
+    let resp = match early_resp {
+        Some(r) => r,
+        None => match timeout(FRAME_IDLE_TIMEOUT, &mut resp_fut).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker request failed")),
+            Err(_) => {
+                eprintln!("proxy: worker response idle timeout");
+                write_502(stream).await?;
+                return Ok(false);
+            }
+        },
+    };
 
     if !resp.status().is_success() {
-        println!(
-            "worker request error: {}, body: {:.512}...",
+        eprintln!(
+            "worker request error: {}, body: {:.1024}...",
             resp.status(),
             resp.text().await.unwrap_or_default()
         );
@@ -635,20 +954,46 @@ where
         return Ok(false);
     }
 
-    let mut parser = sse::SseParser::new();
-    let mut sse_stream = Box::pin(resp.bytes_stream());
-    let mut wrote = false;
+    if !relay_response(stream, resp, algo, shared, parser).await? {
+        return Ok(false);
+    }
 
-    let mut header_buf: Vec<u8> = Vec::new();
-    let mut response_wants_keep_alive: Option<bool> = None;
+    Ok(!client_eof)
+}
+
+/// 压缩+加密并打包成一帧（body_stream 专用小工具）。
+fn enc_frame(data: &[u8], algo: ProxyAlgo, key16: &[u8], key32: &[u8]) -> std::io::Result<Bytes> {
+    let enc = encode_chunk(data, algo.compressor, algo.aead, key16, key32)
+        .map_err(|e| std::io::Error::other(format!("encode failed: {e}")))?;
+    Ok(Bytes::from(make_frame(&enc)))
+}
+
+// ─── 响应回传 ───────────────────────────────────────────────────────────────
+
+/// 把 worker 的帧流解包写回浏览器。帧协议（FrameCache/decode_chunk）是
+/// 私有最小化二进制协议，无需语义解析；同时探测客户端提前断开，
+/// 多读到的字节交还 parser 供 keep-alive 下一轮使用。
+async fn relay_response<S>(
+    stream: &mut S,
+    resp: reqwest::Response,
+    algo: ProxyAlgo,
+    shared: &Arc<Shared>,
+    parser: &mut HeaderPaser,
+) -> Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut frame_cache = FrameCache::new();
+    let mut resp_stream = Box::pin(resp.bytes_stream());
+    let mut wrote = false;
 
     loop {
         tokio::select! {
-            chunk = timeout(SSE_IDLE_TIMEOUT, sse_stream.next()) => {
+            chunk = timeout(FRAME_IDLE_TIMEOUT, resp_stream.next()) => {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("proxy: sse idle timeout (no data for {:?})", SSE_IDLE_TIMEOUT);
+                        eprintln!("proxy: frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -659,21 +1004,24 @@ where
                 let bytes = match chunk {
                     Some(Ok(b)) => b,
                     Some(Err(e)) => {
-                        eprintln!("proxy: sse read error: {e}");
+                        eprintln!("proxy: frame read error: {e}");
                         return Ok(false);
                     }
-                    None => return Ok(false), // 流提前结束（无 done）
+                    None => {
+                        eprintln!("proxy: stream ended without EOS (truncated)");
+                        if !wrote {
+                            write_502(stream).await?;
+                        }
+                        return Ok(false);
+                    }
                 };
 
-                let mut events = Vec::new();
-                parser.push(&bytes, &mut events);
-
-                for ev in events {
-                    match ev {
-                        sse::SseEvent::Data(b64) => {
-                            let enc = Base64::decode(&b64).context("bad base64 payload")?;
+                frame_cache.push(&bytes);
+                loop {
+                    match frame_cache.try_pop() {
+                        Ok(Frame::Frame(raw_enc)) => {
                             let raw = decode_chunk(
-                                &enc,
+                                &raw_enc,
                                 algo.compressor,
                                 algo.aead,
                                 &shared.key16,
@@ -681,61 +1029,44 @@ where
                             )
                             .context("decrypt/decompress failed")?;
 
-
-                            if response_wants_keep_alive.is_none()
-                                && header_buf.len() < HEADER_SNIFF_LIMIT
-                            {
-                                let remaining = HEADER_SNIFF_LIMIT - header_buf.len();
-                                let take = remaining.min(raw.len());
-                                header_buf.extend_from_slice(&raw[..take]);
-                                if let Some(ka) = response_keep_alive(&header_buf) {
-                                    response_wants_keep_alive = Some(ka);
-                                } else if header_buf.len() >= HEADER_SNIFF_LIMIT {
-                                    // 头部异常巨大或格式无法识别，保守按 close 处理
-                                    response_wants_keep_alive = Some(false);
-                                }
-                            }
-
                             stream.write_all(&raw).await?;
-                            // println!("{:.1024}...", format!("{:?}", String::from_utf8_lossy(&raw)));
                             wrote = true;
                         }
-                        sse::SseEvent::Error(msg) => {
+                        Ok(Frame::None) => break,
+                        Ok(Frame::Eos) => {
+                            // 零长帧 = 流正常完成
+                            stream.flush().await?;
+                            return Ok(true);
+                        }
+                        Err(e) => {
+                            eprintln!("proxy: frame protocol error: {e}");
                             if !wrote {
                                 write_502(stream).await?;
                             }
-                            eprintln!("proxy: worker error: {msg}");
                             return Ok(false);
-                        }
-                        sse::SseEvent::Done => {
-                            stream.flush().await?;
-                            let response_ka = response_wants_keep_alive.unwrap_or(false);
-                            return Ok(want_keep_alive && response_ka);
                         }
                     }
                 }
             }
-            closed = browser_closed(stream, cache) => {
+            closed = client_closed(stream, parser) => {
                 if closed? {
-                    return Ok(false); // 浏览器已断开，丢弃残余工作
+                    return Ok(false);
                 }
             }
         }
     }
 }
 
-/// 探测浏览器是否已断开（读取可用字节）。
-async fn browser_closed<S: AsyncRead + Unpin>(
+/// 探测客户端是否已断开（读取可用字节）；未断开时字节存入 parser。
+async fn client_closed<S: AsyncRead + Unpin>(
     stream: &mut S,
-    cache: &mut HttpReqCache,
+    parser: &mut HeaderPaser,
 ) -> Result<bool> {
     let mut buf = [0u8; READ_BUF];
     match stream.read(&mut buf).await {
         Ok(0) | Err(_) => Ok(true),
         Ok(n) => {
-            cache
-                .push(&buf[..n])
-                .context("browser_closed: cache push failed")?;
+            parser.push(&buf[..n])?;
             Ok(false)
         }
     }
@@ -749,52 +1080,8 @@ async fn write_502<S: AsyncWrite + Unpin>(stream: &mut S) -> Result<()> {
     Ok(())
 }
 
-// ─── Keep-Alive 判定 ──────────────────────────────────────────────────────────
-
-/// 依据（部分）响应头字节判断服务端是否希望保持连接。
-/// 返回 `None` 表示 header 尚未收全（或解析失败但尚未超出嗅探上限），
-/// 需要更多数据。
-fn response_keep_alive(data: &[u8]) -> Option<bool> {
-    let mut headers = [httparse::EMPTY_HEADER; HTTP_MAX_HEADERS];
-    let mut resp = httparse::Response::new(&mut headers);
-    match resp.parse(data) {
-        Ok(httparse::Status::Complete(_)) => {
-            let version = resp.version.unwrap_or(0);
-            Some(connection_keep_alive(
-                version,
-                resp.headers.iter().map(|h| (h.name, h.value)),
-            ))
-        }
-        _ => None,
-    }
-}
-
-/// HTTP/1.1 默认 keep-alive，HTTP/1.0 默认 close；
-/// 显式的 Connection 头（可能是逗号分隔的多个 token）优先生效。
-fn connection_keep_alive<'a>(
-    version: u8,
-    headers: impl Iterator<Item = (&'a str, &'a [u8])>,
-) -> bool {
-    let mut keep_alive = version >= 1;
-    for (name, value) in headers {
-        if name.eq_ignore_ascii_case("connection") {
-            let val = String::from_utf8_lossy(value).to_ascii_lowercase();
-            for token in val.split(',') {
-                match token.trim() {
-                    "close" => keep_alive = false,
-                    "keep-alive" => keep_alive = true,
-                    _ => {}
-                }
-            }
-        }
-    }
-    keep_alive
-}
-
 // ─── 错误分类（日志降噪） ─────────────────────────────────────────────────────
 
-/// 判断一个连接处理错误是否属于“客户端主动/异常断开”这类正常网络噪音
-/// （而非代理自身逻辑故障），用于避免此类高频事件把真正的错误日志淹没。
 fn is_benign_disconnect(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         cause
@@ -814,8 +1101,6 @@ fn is_benign_disconnect(e: &anyhow::Error) -> bool {
 
 // ─── 小工具 ───────────────────────────────────────────────────────────────────
 
-/// 构建优选 IP 专用 reqwest client（`.resolve(host, ip:port)`，SNI/Host 仍是域名）。
-/// 传入空串/None 返回 `None`，表示走正常 DNS 解析。
 fn build_pref_client(worker_url: &str, ip: Option<&str>) -> Result<Option<reqwest::Client>> {
     let Some(ip) = ip.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -838,5 +1123,244 @@ fn build_pref_client(worker_url: &str, ip: Option<&str>) -> Result<Option<reqwes
         .tcp_nodelay(true)
         .build()?;
     Ok(Some(client))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 头帧组装：raw 头部 + https 标志位（末尾字节），与 worker 契约一致
+    #[test]
+    fn test_head_frame_layout() {
+        let raw = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut frame = BytesMut::from(&raw[..]);
+        frame.extend_from_slice(&[1u8]); // https
+        assert_eq!(&frame[..frame.len() - 1], raw);
+        assert_eq!(frame[frame.len() - 1], 1);
+
+        let mut frame2 = BytesMut::from(&raw[..]);
+        frame2.extend_from_slice(&[0u8]); // http
+        assert_eq!(frame2[frame2.len() - 1], 0);
+    }
+
+    /// enc_frame：encode_chunk + make_frame 管线，空负载仍加密为非零长帧
+    #[test]
+    fn test_enc_frame_pipeline() {
+        let algo = ProxyAlgo::new(ProxyCompressor::default(), ProxyAead::default());
+        let key16 = [0x42u8; 16];
+        let key32 = [0x7Eu8; 32];
+
+        // 非空负载：帧 = [4B 长度 | 加密负载]，长度与内容一致
+        let frame = enc_frame(b"hello", algo, &key16, &key32).unwrap();
+        assert!(frame.len() > 4);
+        assert_eq!(
+            frame.len(),
+            4 + u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize
+        );
+
+        // 空负载：加密后仍是非零长帧（EOS 标记是裸 make_frame(b"")，不经过 enc_frame）
+        let eos = enc_frame(b"", algo, &key16, &key32).unwrap();
+        let payload_len = u32::from_be_bytes(eos[..4].try_into().unwrap()) as usize;
+        assert!(payload_len > 0);
+        let dec = decode_chunk(&eos[4..], algo.compressor, algo.aead, &key16, &key32).unwrap();
+        assert!(dec.is_empty());
+    }
+
+    fn test_cfg(domain: &str) -> ProxyConfig {
+        ProxyConfig {
+            port: 0,
+            domain: domain.to_string(),
+            use_https: false,
+            auth_key: "test-key".to_string(),
+            ca_dir: std::env::temp_dir().join(format!("fp-proxy-test-{}", std::process::id())),
+            ca_key_secret: [0u8; 32],
+            compressor: ProxyCompressor::default(),
+            aead: ProxyAead::default(),
+            pref_ip: None,
+        }
+    }
+
+    /// domain 携带端口 → 拒绝（token 派生与 worker env 不一致会全链路 401）
+    #[test]
+    fn test_proxy_new_rejects_domain_with_port() {
+        assert!(Proxy::new(test_cfg("example.com:8080")).is_err());
+        assert!(Proxy::new(test_cfg("[::1]:8443")).is_err());
+    }
+
+    /// 纯 host domain → 正常构造
+    #[test]
+    fn test_proxy_new_accepts_pure_domain() {
+        let _ = Proxy::new(test_cfg("free-proxy.example.com")).expect("pure domain must pass");
+    }
+
+    // ─── body_extent / split_body_prefix ────────────────────────────────────────
+
+    fn hdr(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_body_extent_no_body() {
+        assert_eq!(
+            body_extent(&hdr(&[("Host", "e.com")])).unwrap(),
+            BodyExtent::NoBody
+        );
+        assert_eq!(
+            body_extent(&hdr(&[("Content-Length", "0")])).unwrap(),
+            BodyExtent::NoBody
+        );
+    }
+
+    #[test]
+    fn test_body_extent_content_length() {
+        assert_eq!(
+            body_extent(&hdr(&[("Content-Length", "11")])).unwrap(),
+            BodyExtent::ContentLength(11)
+        );
+        assert_eq!(
+            body_extent(&hdr(&[("content-length", "  42 ")])).unwrap(),
+            BodyExtent::ContentLength(42)
+        );
+    }
+
+    #[test]
+    fn test_body_extent_invalid_or_duplicate_cl() {
+        assert!(body_extent(&hdr(&[("Content-Length", "abc")])).is_err());
+        assert!(body_extent(&hdr(&[("Content-Length", "1"), ("Content-Length", "2")])).is_err());
+    }
+
+    #[test]
+    fn test_body_extent_chunked_overrides_cl() {
+        assert_eq!(
+            body_extent(&hdr(&[("Transfer-Encoding", "chunked")])).unwrap(),
+            BodyExtent::Chunked
+        );
+        assert_eq!(
+            body_extent(&hdr(&[
+                ("Transfer-Encoding", "chunked"),
+                ("Content-Length", "5")
+            ]))
+            .unwrap(),
+            BodyExtent::Chunked
+        );
+        assert_eq!(
+            body_extent(&hdr(&[("Transfer-Encoding", "gzip, chunked")])).unwrap(),
+            BodyExtent::Chunked
+        );
+        assert_eq!(
+            body_extent(&hdr(&[("Transfer-Encoding", "identity")])).unwrap(),
+            BodyExtent::NoBody
+        );
+    }
+
+    #[test]
+    fn test_split_body_prefix_cases() {
+        assert_eq!(split_body_prefix(b"GET /n", &BodyExtent::NoBody), (0, 6));
+        assert_eq!(
+            split_body_prefix(b"hello", &BodyExtent::ContentLength(10)),
+            (5, 0)
+        );
+        assert_eq!(
+            split_body_prefix(b"hello", &BodyExtent::ContentLength(5)),
+            (5, 0)
+        );
+        assert_eq!(
+            split_body_prefix(b"hello world", &BodyExtent::ContentLength(5)),
+            (5, 6)
+        );
+        assert_eq!(
+            split_body_prefix(b"hello world", &BodyExtent::Chunked),
+            (11, 0)
+        );
+    }
+
+    // ─── ChunkedEndScanner ──────────────────────────────────────────────────────
+
+    /// 按 parts 分段喂入，返回 (累计转发的 body 字节数, 是否检测到结束)
+    fn scan_parts(parts: &[&[u8]]) -> (usize, bool) {
+        let mut scanner = ChunkedEndScanner::new();
+        let mut forwarded = 0usize;
+        for p in parts {
+            match scanner.feed(p).unwrap() {
+                Some(t) => {
+                    forwarded += t;
+                    return (forwarded, true);
+                }
+                None => forwarded += p.len(),
+            }
+        }
+        (forwarded, false)
+    }
+
+    #[test]
+    fn test_chunked_single_chunk() {
+        let wire: &[u8] = b"4\r\nabcd\r\n0\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (14, true));
+    }
+
+    #[test]
+    fn test_chunked_multiple_chunks() {
+        let wire: &[u8] = b"5\r\nhello\r\n6\r\nworld!\r\n0\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (26, true));
+    }
+
+    #[test]
+    fn test_chunked_empty_body() {
+        let wire: &[u8] = b"0\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (5, true));
+    }
+
+    #[test]
+    fn test_chunked_chunk_extension() {
+        let wire: &[u8] = b"1a;ext=1\r\n01234567890123456789012345\r\n0\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (43, true));
+    }
+
+    #[test]
+    fn test_chunked_trailers() {
+        let wire: &[u8] = b"4\r\nabcd\r\n0\r\nX-T: v\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (22, true));
+    }
+
+    #[test]
+    fn test_chunked_body_data_looks_like_terminator() {
+        // chunk 数据里含 "0\r\n\r\n" 不得误判结束
+        let wire: &[u8] = b"6\r\n0\r\n\r\nX\r\n0\r\n\r\n";
+        assert_eq!(scan_parts(&[wire]), (16, true));
+    }
+
+    #[test]
+    fn test_chunked_split_across_feeds() {
+        let parts: [&[u8]; 6] = [b"4\r\n", b"ab", b"cd\r\n", b"0\r\n", b"\r", b"\n"];
+        assert_eq!(scan_parts(&parts), (14, true));
+    }
+
+    #[test]
+    fn test_chunked_feed_after_done_returns_zero() {
+        let mut scanner = ChunkedEndScanner::new();
+        assert_eq!(scanner.feed(b"4\r\nabcd\r\n0\r\n\r\n").unwrap(), Some(14));
+        assert_eq!(scanner.feed(b"NEXT").unwrap(), Some(0));
+    }
+
+    #[test]
+    fn test_chunked_remaining_after_end_detected() {
+        // 结束点之后的字节（下一请求）不计入 body
+        let wire: &[u8] = b"4\r\nabcd\r\n0\r\n\r\nGET / HTTP/1.1\r\n\r\n";
+        let mut scanner = ChunkedEndScanner::new();
+        assert_eq!(scanner.feed(wire).unwrap(), Some(14));
+    }
+
+    #[test]
+    fn test_chunked_malformed() {
+        let mut s1 = ChunkedEndScanner::new();
+        assert!(s1.feed(b"zz\r\n").is_err());
+
+        // chunk 数据后缺 CRLF
+        let mut s2 = ChunkedEndScanner::new();
+        assert!(s2.feed(b"4\r\nabcdX0\r\n\r\n").is_err());
+    }
 }
 

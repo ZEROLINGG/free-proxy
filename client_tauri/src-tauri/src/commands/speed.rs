@@ -4,19 +4,19 @@ use std::net::SocketAddr;
 //   speed_test_cancel → 置取消标志 + abort 后台任务
 //   speed_test_state  → 拉模式查询是否在跑
 // 进度/结果全部经事件推送，payload 携带 gen，前端忽略过期代际的事件。
+use super::settings::ProxySettings;
+use super::Result;
 use anyhow::Result as AnyhowResult;
 use lib::speed_test::health::{batch_health, default_matcher};
 use lib::speed_test::ip::IpBuffer;
 use lib::speed_test::tcping::batch_tcping;
+use lib::tool::derive_keys;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use reqwest::Client;
 use tauri::{AppHandle, Emitter, Runtime};
-use lib::tool::derive_keys;
-use super::settings::ProxySettings;
-use super::Result;
 
 /// 单次测速会话的整体时长上限，超时自动中止并报错
 const SESSION_HARD_DEADLINE: Duration = Duration::from_secs(120);
@@ -255,7 +255,10 @@ async fn run_speed_test<R: Runtime>(
         Err(e) => {
             let _ = app.emit(
                 "speed-test:error",
-                ErrorPayload { gen, message: format!("{e:#}") },
+                ErrorPayload {
+                    gen,
+                    message: format!("{e:#}"),
+                },
             );
         }
     }
@@ -272,11 +275,18 @@ async fn run_speed_test_inner<R: Runtime>(
     let tcping_timeout = Duration::from_millis(opts.tcping_timeout_ms.max(1));
 
     let domain = s.domain.trim().to_string();
+    reject_domain_port(&domain)?;
 
     let cidrs: Vec<&str> = CF_IP_V4.split_whitespace().collect();
     let buf = IpBuffer::new(cidrs, total)?;
 
-    let _ = app.emit("speed-test:phase", PhasePayload { gen, phase: Phase::Tcping });
+    let _ = app.emit(
+        "speed-test:phase",
+        PhasePayload {
+            gen,
+            phase: Phase::Tcping,
+        },
+    );
 
     let mut last_emit = Instant::now();
     let (results, aborted) = batch_tcping(
@@ -329,7 +339,13 @@ async fn run_speed_test_inner<R: Runtime>(
         let keys = derive_keys(&s.auth_key, &domain)?;
         lib::proxy::gen_auth_token(&keys.token_base)
     };
-    let _ = app.emit("speed-test:phase", PhasePayload { gen, phase: Phase::Health });
+    let _ = app.emit(
+        "speed-test:phase",
+        PhasePayload {
+            gen,
+            phase: Phase::Health,
+        },
+    );
 
     let mut last_emit = Instant::now();
     let (healthy, aborted) = batch_health(
@@ -392,13 +408,19 @@ async fn run_speed_test_inner<R: Runtime>(
 #[tauri::command]
 pub async fn worker_health(s: ProxySettings) -> Result<bool> {
     let host = s.domain.trim().to_string();
+    reject_domain_port(&host).map_err(super::err_str)?;
     let token = {
         let keys = derive_keys(&s.auth_key, &host).map_err(super::err_str)?;
         lib::proxy::gen_auth_token(&keys.token_base)
     };
 
     let mut ips: Vec<String> = Vec::new();
-    if let Some(ip) = s.pref_ip.as_deref().map(str::trim).filter(|ip| !ip.is_empty()) {
+    if let Some(ip) = s
+        .pref_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+    {
         ips.push(ip.to_string());
     }
     ips.extend(DEFAULT_WORKER_IPS.iter().map(|s| s.to_string()));
@@ -442,4 +464,14 @@ pub async fn worker_health(s: ProxySettings) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// domain 不允许携带端口：worker 侧密钥派生基于纯 host，带端口会导致
+/// token 不匹配（全链路 401）。与 Proxy::new 的校验保持一致。
+fn reject_domain_port(domain: &str) -> AnyhowResult<()> {
+    let (_host, port) = lib::http::split_host_port(domain)?;
+    if port.is_some() {
+        anyhow::bail!("domain must not contain a port, got {domain:?}");
+    }
+    Ok(())
 }

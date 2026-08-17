@@ -1,8 +1,10 @@
-import { Activity, ChevronRight, ShieldCheck } from "lucide-react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { Activity, AlertTriangle, ChevronRight, Copy, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import {
   AEADS,
   COMPRESSORS,
+  FIELD_LABELS,
   isAead,
   isCompressor,
   validateSettings,
@@ -20,6 +22,7 @@ import { useUi } from "../store/ui";
 
 export function Dashboard() {
   const settings = useSettings((s) => s.settings);
+  const completeness = useSettings((s) => s.completeness);
   const {
     status,
     busy,
@@ -37,6 +40,25 @@ export function Dashboard() {
   const navigate = useUi((s) => s.navigate);
   const toast = useUi((s) => s.toast);
   const [hotBusy, setHotBusy] = useState(false);
+  const [copying, setCopying] = useState(false);
+
+  const subscriptionUrl = `${settings.useHttps ? "https" : "http"}://${settings.domain.trim()}/subscribe/${status.running ? status.port : settings.localPort}`;
+
+  const copySubscription = async () => {
+    if (!settings.domain.trim()) {
+      toast("请先在「代理」页填写 Worker 域名", "error");
+      return;
+    }
+    setCopying(true);
+    try {
+      await writeText(subscriptionUrl);
+      toast("订阅链接已复制到剪贴板", "success");
+    } catch (e) {
+      toast(`复制失败：${e}`, "error");
+    } finally {
+      setCopying(false);
+    }
+  };
 
   // 运行中显示实际生效值；未运行时回退到设置值（下次启动生效）
   const shownAead: Aead = status.running && isAead(status.aead) ? status.aead : settings.aead;
@@ -109,6 +131,21 @@ export function Dashboard() {
       <ColoredCta running={status.running} busy={busy} onClick={toggle} />
 
       <Panel title="运行状态">
+        {!completeness.ok && (
+          <div className="mx-[clamp(17px,3vw,24px)] mt-3 flex items-center gap-2 rounded-thumb bg-error-bg px-3.5 py-2.5">
+            <AlertTriangle size={15} className="shrink-0 text-error" />
+            <span className="min-w-0 flex-1 text-[12.5px] text-error">
+              配置不完整：{completeness.invalidFields.map((k) => FIELD_LABELS[k]).join("、")}
+            </span>
+            <Button
+              variant="secondary"
+              className="h-7 shrink-0 px-3 text-[12px]"
+              onClick={() => navigate("proxy")}
+            >
+              去完善
+            </Button>
+          </div>
+        )}
         <div className="divide-y divide-hairline">
           <ListRow>
             <span className="w-20 shrink-0 text-[13.5px] text-ink3">状态</span>
@@ -194,6 +231,30 @@ export function Dashboard() {
                 onClick={() => checkHealth(settings)}
               >
                 检测
+              </Button>
+            </span>
+          </ListRow>
+          <ListRow>
+            <span className="w-20 shrink-0 text-[13.5px] text-ink3">订阅</span>
+            <span className="flex flex-1 items-center justify-between gap-3">
+              {settings.domain.trim() ? (
+                <span
+                  className="tnum truncate font-mono text-[12px] text-ink3"
+                  title={subscriptionUrl}
+                >
+                  {subscriptionUrl}
+                </span>
+              ) : (
+                <span className="text-[12.5px] text-ink4">未配置域名</span>
+              )}
+              <Button
+                variant="secondary"
+                className="h-8 shrink-0 px-3.5 text-[12.5px]"
+                loading={copying}
+                onClick={() => void copySubscription()}
+              >
+                <Copy size={15} />
+                复制
               </Button>
             </span>
           </ListRow>

@@ -384,4 +384,123 @@ mod tests {
         let raw = decode_chunk(&enc, compressor, aead, &key16, &key32).unwrap();
         assert_eq!(raw, payload);
     }
+
+    /// 端到端管线：服务端 pack_frame(encode_chunk) → 帧流 → 客户端 FrameCache → decode_chunk
+    /// 锁定"服务端打包 → 客户端解析"对称性（二进制帧流重构后的核心契约）。
+    #[test]
+    fn test_frame_wire_pipeline_all_combos() {
+        use crate::frames::{Frame, FrameCache, make_frame};
+
+        let key16 = [0x42u8; 16];
+        let key32 = [0x7Eu8; 32];
+        let chunks = [
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec(),
+            b"1a\r\nhello world hello world hello world\r\n".to_vec(),
+            b"0\r\n\r\n".to_vec(),
+        ];
+
+        for c in ProxyCompressor::ALL {
+            for a in ProxyAead::ALL {
+                // 服务端：逐块打包成一帧，帧与帧直接相连，末尾零长帧 = EOS
+                let mut wire = Vec::new();
+                for chunk in &chunks {
+                    let enc = encode_chunk(chunk, c, a, &key16, &key32).unwrap();
+                    wire.extend_from_slice(&make_frame(&enc));
+                }
+                wire.extend_from_slice(&make_frame(b"")); // EOS
+
+                // 客户端：分块喂入（模拟网络分片）→ try_pop 收集帧 → 解密解压
+                let mut parser = FrameCache::new();
+                for part in wire.chunks(7) {
+                    parser.push(part);
+                }
+                parser.push(b""); // 空块 no-op
+
+                let mut out = Vec::new();
+                let mut eos = false;
+                loop {
+                    match parser.try_pop().unwrap() {
+                        Frame::Frame(f) => out.push(f),
+                        Frame::None => break,
+                        Frame::Eos => {
+                            eos = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(eos, "{c:?} + {a:?}: missing EOS");
+
+                assert_eq!(out.len(), chunks.len(), "{c:?} + {a:?}");
+                for (enc, expect) in out.iter().zip(chunks.iter()) {
+                    let raw = decode_chunk(enc, c, a, &key16, &key32).unwrap();
+                    assert_eq!(&raw, expect, "{c:?} + {a:?}");
+                }
+            }
+        }
+    }
+
+    /// 请求方向（流式上传）管线：客户端"头帧(head+https标志) → body 帧 → EOS"，
+    /// 服务端按帧解析并还原出 head 与完整 body。锁定新协议契约。
+    #[test]
+    fn test_upload_pipeline_head_frame_then_body_frames() {
+        use crate::frames::{Frame, FrameCache, make_frame};
+
+        let key16 = [0x42u8; 16];
+        let key32 = [0x7Eu8; 32];
+
+        // 浏览器原始请求：头 + body（Content-Length: 11）
+        let head = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 11\r\n\r\n";
+        let body = b"hello world";
+
+        for c in ProxyCompressor::ALL {
+            for a in ProxyAead::ALL {
+                // 客户端打包：头帧 = head + https 标志位（末尾字节）
+                let mut head_frame = head.to_vec();
+                head_frame.push(1u8); // https
+                let mut wire = Vec::new();
+                wire.extend_from_slice(&make_frame(
+                    &encode_chunk(&head_frame, c, a, &key16, &key32).unwrap(),
+                ));
+                for chunk in body.chunks(4) {
+                    wire.extend_from_slice(&make_frame(
+                        &encode_chunk(chunk, c, a, &key16, &key32).unwrap(),
+                    ));
+                }
+                wire.extend_from_slice(&make_frame(b"")); // EOS = 请求体结束
+
+                // 服务端解析（模拟网络分片）
+                let mut parser = FrameCache::new();
+                for part in wire.chunks(7) {
+                    parser.push(part);
+                }
+
+                // 第一帧 = 头帧
+                let first = match parser.try_pop().unwrap() {
+                    Frame::Frame(f) => f,
+                    other => panic!("{c:?} + {a:?}: expected head frame, got {other:?}"),
+                };
+                let decoded_head = decode_chunk(&first, c, a, &key16, &key32).unwrap();
+                assert_eq!(&decoded_head[..decoded_head.len() - 1], head, "{c:?} + {a:?}");
+                assert_eq!(decoded_head[decoded_head.len() - 1], 1, "{c:?} + {a:?}");
+
+                // 其余帧 = body 帧，EOS 收尾
+                let mut assembled = Vec::new();
+                let mut eos = false;
+                loop {
+                    match parser.try_pop().unwrap() {
+                        Frame::Frame(f) => {
+                            assembled.extend_from_slice(&decode_chunk(&f, c, a, &key16, &key32).unwrap());
+                        }
+                        Frame::None => break,
+                        Frame::Eos => {
+                            eos = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(eos, "{c:?} + {a:?}: missing EOS");
+                assert_eq!(assembled, body, "{c:?} + {a:?}");
+            }
+        }
+    }
 }

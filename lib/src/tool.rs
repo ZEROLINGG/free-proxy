@@ -1,8 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::LazyLock;
-use anyhow::anyhow;
 use crate::hash::{Blake3, Hasher};
 use crate::kdf::{HkdfSha256, Kdf, Pbkdf2HmacSha256};
+use anyhow::anyhow;
 
 pub fn xoroshiro128(s: u128) -> u128 {
     let mut s0 = (s >> 64) as u64;
@@ -76,6 +74,8 @@ pub fn token_gen<D: AsRef<[u8]>>(token_base: D, now: u64, nonce: u64) -> String 
 #[cfg(feature = "client")]
 pub fn gen_auth_token(token_base: &[u8; 16]) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::LazyLock;
     static TOKEN_NONCE: LazyLock<AtomicU64> = LazyLock::new(|| {
         let m = [0u8; 1];
         let n = vec![0u8; 1];
@@ -153,6 +153,20 @@ pub fn derive_keys(auth_key: &str, domain: &str) -> anyhow::Result<DerivedKeys> 
         token_base,
     })
 }
+
+
+/// 由设备 uid 派生 CA 私钥保护密钥（32B）：
+#[cfg(feature = "client")]
+pub fn derive_ca_key_secret(device_uid: &str, salt: &[u8]) -> anyhow::Result<[u8; 32]> {
+    use crate::kdf::{HkdfSha512, Kdf};
+    let ikm = Blake3::digest_vec(device_uid.as_bytes());
+    let out = HkdfSha512::derive(ikm, salt, 32)?;
+    Ok(out
+        .try_into()
+        .expect("hkdf output length is pinned to 32 bytes"))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

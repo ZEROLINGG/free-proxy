@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use ipnetwork::IpNetwork;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -18,8 +18,9 @@ pub async fn tcping(addr: &IpNetwork, port: u16, timeout_dur: Duration) -> Resul
         .map_err(|_| anyhow!("tcp connect timeout"))??;
     drop(stream);
 
-    let elapsed = start.elapsed();
-    Ok(elapsed.as_secs_f32() * 1000.0)
+    let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+    ensure!(elapsed > 5.0 , "请关闭tun或者其他代理！！！");
+    Ok(elapsed)
 }
 
 /// 从 IpBuffer 并发测速，返回 (ip, rtt_ms) 列表（按弹出顺序，未排序）。
@@ -64,7 +65,7 @@ pub async fn batch_tcping(
             },
             Err(e) => {
                 errors.push((
-                    IpNetwork::V4("0.0.0.0/0".parse().unwrap()),
+                    IpNetwork::V4("0.0.0.0/0".parse()?),
                     format!("task panicked: {e}"),
                 ));
             }
