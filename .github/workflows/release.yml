@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ========== Job 1: 创建空 draft Release（唯一创建者 + 自动 changelog） ==========
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      # 防呆：tag 版本必须与 tauri.conf.json 的 version 一致
+      - name: Verify version matches tag
+        run: |
+          CONF_VERSION=$(jq -r .version client_tauri/src-tauri/tauri.conf.json)
+          TAG_VERSION=${GITHUB_REF_NAME#v}
+          if [ "$CONF_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tauri.conf.json version ($CONF_VERSION) != tag version ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          generate_release_notes: true
+
+  # ========== Job 2: Tauri 桌面端（Windows / macOS x2 / Linux） ==========
+  build-tauri:
+    name: Build Tauri (${{ matrix.platform.name }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: Windows,                os: windows-latest }
+          - { name: macOS (Intel),          os: macos-latest, target: x86_64-apple-darwin,   args: '--target x86_64-apple-darwin' }
+          - { name: macOS (Apple Silicon),  os: macos-latest, target: aarch64-apple-darwin,  args: '--target aarch64-apple-darwin' }
+          - { name: Linux,                  os: ubuntu-24.04 }
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm 10
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './client_tauri/src-tauri -> target'
+
+      - name: Install Linux dependencies
+        if: matrix.platform.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Install frontend dependencies
+        working-directory: ./client_tauri
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and upload Tauri App
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: './client_tauri'
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          args: ${{ matrix.platform.args }}
+
+  # ========== Job 3: Rust CLI（与 Tauri 并行上传） ==========
+  build-cli:
+    name: Build CLI (${{ matrix.platform.name }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: Windows, os: windows-latest, ext: '.exe' }
+          - { name: macOS,   os: macos-latest }
+          - { name: Linux,   os: ubuntu-24.04 }
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './client_cli -> target'
+
+      - name: Build CLI
+        run: cargo build --release --locked --manifest-path client_cli/Cargo.toml
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cp "client_cli/target/release/client_cli${{ matrix.platform.ext }}" \
+             "client-cli-${VERSION}-${{ matrix.platform.name }}${{ matrix.platform.ext }}"
+          echo "ASSET_NAME=client-cli-${VERSION}-${{ matrix.platform.name }}${{ matrix.platform.ext }}" >> "$GITHUB_ENV"
+
+      - name: Upload CLI to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ env.ASSET_NAME }}
