@@ -46,10 +46,10 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { name: Windows,                os: windows-latest }
-          - { name: macOS (Intel),          os: macos-latest, target: x86_64-apple-darwin,   args: '--target x86_64-apple-darwin' }
-          - { name: macOS (Apple Silicon),  os: macos-latest, target: aarch64-apple-darwin,  args: '--target aarch64-apple-darwin' }
-          - { name: Linux,                  os: ubuntu-24.04 }
+          - { name: Windows,                os: windows-latest, pattern: 'free-proxy_gui_windows_x86_64_[version][ext]' }
+          - { name: macOS (Intel),          os: macos-latest, target: x86_64-apple-darwin,   args: '--target x86_64-apple-darwin',  pattern: 'free-proxy_gui_macos_x86_64_[version][ext]' }
+          - { name: macOS (Apple Silicon),  os: macos-latest, target: aarch64-apple-darwin,  args: '--target aarch64-apple-darwin', pattern: 'free-proxy_gui_macos_aarch64_[version][ext]' }
+          - { name: Linux,                  os: ubuntu-24.04, pattern: 'free-proxy_gui_linux_x86_64_[version][ext]' }
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v6
@@ -93,6 +93,7 @@ jobs:
           projectPath: './client_tauri'
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          releaseAssetNamePattern: ${{ matrix.platform.pattern }}
           args: ${{ matrix.platform.args }}
 
   # ========== Job 3: Rust CLI（与 Tauri 并行上传） ==========
@@ -103,9 +104,9 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { name: Windows, os: windows-latest, ext: '.exe' }
-          - { name: macOS,   os: macos-latest }
-          - { name: Linux,   os: ubuntu-24.04 }
+          - { name: Windows, os: windows-latest, label: windows, arch: x86_64,  ext: '.exe' }
+          - { name: macOS,   os: macos-latest,   label: macos,    arch: aarch64 }
+          - { name: Linux,   os: ubuntu-24.04,   label: linux,    arch: x86_64  }
     runs-on: ${{ matrix.platform.os }}
     steps:
       - uses: actions/checkout@v6
@@ -126,8 +127,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           cp "client_cli/target/release/client_cli${{ matrix.platform.ext }}" \
-             "client-cli-${VERSION}-${{ matrix.platform.name }}${{ matrix.platform.ext }}"
-          echo "ASSET_NAME=client-cli-${VERSION}-${{ matrix.platform.name }}${{ matrix.platform.ext }}" >> "$GITHUB_ENV"
+             "free-proxy_cli_${{ matrix.platform.label }}_${{ matrix.platform.arch }}_${VERSION}${{ matrix.platform.ext }}"
+          echo "ASSET_NAME=free-proxy_cli_${{ matrix.platform.label }}_${{ matrix.platform.arch }}_${VERSION}${{ matrix.platform.ext }}" >> "$GITHUB_ENV"
 
       - name: Upload CLI to Release
         uses: softprops/action-gh-release@v3
