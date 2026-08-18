@@ -11,7 +11,7 @@
 - **服务端**跑在 Cloudflare Worker 上——这是 Cloudflare 的**免费**服务，按免费额度提供日常请求量，个人上网绰绰有余；
 - **客户端**是桌面 / 手机上的一个小应用，负责加密、压缩、加速，并把流量交给你的 Worker 转发。
 
-
+<div><img alt="" src="./image/screenshot-20260818-164913.png"></div>
 
 ### 它能给你带来什么
 
@@ -188,8 +188,17 @@ cargo test -p lib
 - 密钥由 `auth_key + domain` 经 PBKDF2/HKDF 派生，客户端与 Worker 两端独立推导出同一组密钥，无需网络传输密钥；
 - 每次请求的认证令牌由可逆 xoroshiro128 混淆 + 时间戳 + nonce 组成，服务端仅接受 ±30 秒内的令牌；
 - 本地 CA 私钥使用设备唯一标识 + 随机盐派生密钥加密存储，换设备需重新导入证书。
+- 使用http2请求worker
 
 ### Roadmap / 已知限制
 
 - `ws`（WebSocket / 升级隧道）支持尚未完成；
 - iOS 端尚未适配；
+
+
+
+### 客户端界面
+
+<div><img alt="" src="./image/screenshot-20260818-164651.png"></div>
+<div><img alt="" src="./image/screenshot-20260818-164709.png"></div>
+
