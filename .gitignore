@@ -16,5 +16,7 @@
 *.key
 *.crt
 *.p12
+*.jks
+client_tauri/src-tauri/gen/android/keystore.properties
 
 

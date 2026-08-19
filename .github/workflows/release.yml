@@ -136,3 +136,151 @@ jobs:
           tag_name: ${{ github.ref_name }}
           draft: true
           files: ${{ env.ASSET_NAME }}
+
+  # ========== Job 4: Android 客户端（universal 签名 APK） ==========
+  build-android:
+    name: Build Android APK
+    needs: create-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm 10
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install "platform-tools" \
+            "platforms;android-36" "build-tools;36.0.0" \
+            "ndk;27.3.13750724"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Setup Rust (Android targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './client_tauri/src-tauri -> target'
+
+      - name: Install frontend dependencies
+        working-directory: ./client_tauri
+        run: pnpm install --frozen-lockfile
+
+      - name: Regenerate Android project (fix absolute paths)
+        working-directory: ./client_tauri
+        run: pnpm tauri android init --ci
+
+      - name: Setup Android signing
+        env:
+          KEYSTORE_B64:  ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS:     ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS:      ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/free-proxy.jks"
+          cat > client_tauri/src-tauri/gen/android/keystore.properties <<EOF
+          storeFile=$RUNNER_TEMP/free-proxy.jks
+          storePassword=$KEYSTORE_PASS
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASS
+          EOF
+
+      - name: Build Android APK
+        working-directory: ./client_tauri
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+        run: pnpm tauri android build --apk --ci
+
+      - name: Rename APK
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cp client_tauri/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+             free-proxy_gui_android_universal_${VERSION}.apk
+          echo "ASSET_NAME=free-proxy_gui_android_universal_${VERSION}.apk" >> "$GITHUB_ENV"
+
+      - name: Upload APK to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ env.ASSET_NAME }}
+
+  # ========== Job 5: Worker 服务端（成品 zip，供用户自行部署） ==========
+  build-worker:
+    name: Build Worker bundle (zip)
+    needs: create-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Rust (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './server-rs -> target'
+
+      - name: Install worker-build
+        run: cargo install -q "worker-build@^0.8"
+
+      - name: Build Worker bundle
+        working-directory: ./server-rs
+        run: worker-build --release
+
+      - name: Package zip
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF_NAME#v}
+          STAGE=free-proxy-worker-${VERSION}
+          mkdir -p "$STAGE/build"
+          cp -r server-rs/build/index.js server-rs/build/index_bg.wasm \
+                server-rs/build/package.json server-rs/build/worker "$STAGE/build/"
+          awk '!s && /^\[build\]/{s=1; next} s && /^\[/{s=0} !s' \
+            server-rs/wrangler.toml > "$STAGE/wrangler.toml"
+          if grep -q '^\[build\]' "$STAGE/wrangler.toml"; then
+            echo "::error::[build] section not stripped"; exit 1
+          fi
+          test -f "$STAGE/build/index.js" || { echo "::error::bundle missing"; exit 1; }
+          cat > "$STAGE/README.md" <<'EOF'
+          # free-proxy Worker
+          ## 部署
+          1. npm i -g wrangler
+          2. 进入本目录: wrangler login && wrangler deploy
+          3. 配置密钥(首次):
+             wrangler secret put key    # 客户端认证密钥,自定一串字符
+             wrangler secret put domain # 你的 Worker 域名,如 free-proxy.xxx.workers.dev
+          ## 更新
+          下载新版 zip 重新执行 2;密钥已存在则无需重配(第 3 步可跳过)。
+          EOF
+          zip -r "free-proxy_worker_${VERSION}.zip" "$STAGE"
+          echo "ASSET_NAME=free-proxy_worker_${VERSION}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload zip to Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ env.ASSET_NAME }}
