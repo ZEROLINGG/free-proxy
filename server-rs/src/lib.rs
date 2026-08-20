@@ -10,7 +10,7 @@ use axum::{routing::get, routing::post, Router};
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tower_service::Service;
 use worker::send::IntoSendFuture;
 use worker::{Context, Date, Env, Fetch, HttpRequest};
@@ -47,7 +47,13 @@ async fn middleware(
     Err(StatusCode::UNAUTHORIZED)
 }
 
-fn router(state: DerivedKeys) -> Router {
+#[derive(Clone)]
+struct AppState {
+    keys: DerivedKeys,
+    ctx: Arc<Context>,
+}
+
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| async { "Hello, World!" }))
         .route(
@@ -55,8 +61,9 @@ fn router(state: DerivedKeys) -> Router {
             get(|| async { Date::now().as_millis().to_string() }),
         )
         .route("/api/{version}/{target}", post(proxy))
-        .with_state(state.clone())
-        .layer(axum::middleware::from_fn_with_state(state, middleware))
+        .route("/ws/{version}/{target}", get(proxy_ws))
+        .layer(axum::middleware::from_fn_with_state(state.keys.clone(), middleware))
+        .with_state(state)
         .route("/subscribe/{port}", get(subscribe))
         .fallback(|| async { "not found" })
 }
@@ -255,13 +262,25 @@ rules:
     }
 }
 
-pub async fn proxy(
-    State(state): State<DerivedKeys>,
+
+#[worker::send]
+pub async fn proxy_ws(
+    State(state): State<AppState>,
     Path((version, target)): Path<(String, String)>,
     req: Request,
 ) -> std::result::Result<Response, (StatusCode, String)> {
-    let key16 = state.key16;
-    let key32 = state.key32;
+    //  需要使用state.ctx.wait_until()处理ws
+    todo!()
+}
+
+#[worker::send]
+pub async fn proxy(
+    State(state): State<AppState>,
+    Path((version, target)): Path<(String, String)>,
+    req: Request,
+) -> std::result::Result<Response, (StatusCode, String)> {
+    let key16 = state.keys.key16;
+    let key32 = state.keys.key32;
 
     // 算法映射与客户端共享（lib::algo），URL 契约有往返单测兜底
     let compressor = ProxyCompressor::from_version(&version).map_err(|_| {
@@ -597,9 +616,9 @@ fn build_state(env: &Env) -> Result<DerivedKeys> {
 async fn fetch(
     req: HttpRequest,
     env: Env,
-    _ctx: Context,
-) -> Result<axum::http::Response<axum::body::Body>> {
-    let state = match STATE.get() {
+    ctx: Context,
+) -> Result<axum::http::Response<Body>> {
+    let keys = match STATE.get() {
         Some(s) => s.clone(),
         None => {
             let s = build_state(&env)?;
@@ -608,5 +627,5 @@ async fn fetch(
         }
     };
 
-    Ok(router(state).call(req).await?)
+    Ok(router(AppState { keys, ctx: Arc::new(ctx) }).call(req).await?)
 }
