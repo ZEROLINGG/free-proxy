@@ -33,7 +33,7 @@ fn default_use_https() -> bool {
 }
 
 fn default_local_port() -> u16 {
-    8080
+    8081
 }
 
 fn default_compressor() -> String {

@@ -114,7 +114,7 @@ export const DEFAULT_SETTINGS: ProxySettings = {
   domain: "",
   useHttps: false,
   authKey: "",
-  localPort: 8080,
+  localPort: 8081,
   compressor: "zstd",
   aead: "aes128gcm",
   prefIp: null,
