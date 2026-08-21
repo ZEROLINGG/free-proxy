@@ -211,9 +211,6 @@ cargo test -p lib
 - 本地 CA 私钥使用设备唯一标识 + 随机盐派生密钥加密存储，换设备需重新导入证书。
 - 使用http2请求worker
 
-### Roadmap / 已知限制
-
-- iOS 端尚未适配；
 
 
 
