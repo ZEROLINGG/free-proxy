@@ -27,12 +27,31 @@ const DONE_MAX_ROWS: usize = 50;
 /// 测速与健康检查统一使用的端口（大陆环境 *.workers.dev 走 HTTP/80 绕过 SNI 阻断）
 const TEST_PORT: u16 = 80;
 /// worker_health 的默认探测 IP 池（prefIp 优先，之后按序尝试）
-const DEFAULT_WORKER_IPS: [&str; 5] = [
+const DEFAULT_WORKER_IPS: [&str; 24] = [
     "104.17.23.238",
-    "104.16.39.227",
+    "104.16.154.227",
     "104.16.124.96",
     "172.64.0.117",
     "162.158.0.6",
+    "104.16.244.4",
+    "104.17.23.0",
+    "104.17.164.47",
+    "104.19.35.37",
+    "104.17.211.205",
+    "104.17.60.203",
+    "104.21.91.95",
+    "104.17.217.114",
+    "104.18.42.50",
+    "104.25.253.190",
+    "104.17.210.207",
+    "104.17.171.139",
+    "104.25.246.118",
+    "104.21.83.106",
+    "104.17.30.120",
+    "104.18.45.139",
+    "172.64.229.223",
+    "104.16.251.224",
+    "104.16.148.159",
 ];
 
 /// Cloudflare 官方 IPv4 网段（IP 优选采样范围）
@@ -404,7 +423,7 @@ async fn run_speed_test_inner<R: Runtime>(
 }
 
 /// 验证 worker 配置：HTTP/80 + `.resolve()` 绕过 DNS 污染与 SNI 阻断。
-/// IP 顺序：prefIp（若设置）→ 内置默认池；任一返回 200 即视为通过。
+/// 限制最多 6 个并发探测，只要其中任意一个 IP 返回 200，则立即返回 true 并自动取消其余任务。
 #[tauri::command]
 pub async fn worker_health(s: ProxySettings) -> Result<bool> {
     let host = s.domain.trim().to_string();
@@ -425,46 +444,93 @@ pub async fn worker_health(s: ProxySettings) -> Result<bool> {
     }
     ips.extend(DEFAULT_WORKER_IPS.iter().map(|s| s.to_string()));
 
-    for ip in ips {
-        let addr: SocketAddr = format!("{ip}:{TEST_PORT}")
-            .parse()
-            .map_err(super::err_str)?;
-        let client = match Client::builder()
-            .resolve(&host, addr)
-            .timeout(Duration::from_secs(3))
-            .no_proxy()
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("worker_health: failed to build client for {ip}: {e}");
-                continue;
-            }
-        };
+    let mut set = tokio::task::JoinSet::new();
+    let mut ips_iter = ips.into_iter();
+    let max_concurrent = 6;
 
-        let url = lib::http::UrlBuilder::new()
-            .https(false)
-            .host(host.as_str())
-            .port(TEST_PORT)
-            .path("/health")
-            .build()
-            .map_err(super::err_str)?;
-        let resp = match client.get(url).bearer_auth(&token).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("worker_health: {ip} failed: {e}");
-                continue;
-            }
-        };
-        let status = resp.status();
-        match resp.bytes().await {
-            Ok(body) if default_matcher(status, &body) => return Ok(true),
-            Ok(_) => eprintln!("worker_health: {ip} matcher failed (status {status})"),
-            Err(e) => eprintln!("worker_health: {ip} read body failed: {e}"),
+    // 先启动第一批 (最多 6 个) 并发任务
+    for _ in 0..max_concurrent {
+        if let Some(ip) = ips_iter.next() {
+            let host_c = host.clone();
+            let token_c = token.clone();
+            set.spawn(async move { check_worker_ip(ip, host_c, token_c).await });
         }
     }
+
+    // 监听已完成的任务，维护并发池
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(true) => {
+                set.abort_all();
+                return Ok(true);
+            }
+            _ => {
+                // 探测失败 (Ok(false)) 或是 task panick (Err)。如果有剩余 IP，补充进池子保持 6 个并发。
+                if let Some(ip) = ips_iter.next() {
+                    let host_c = host.clone();
+                    let token_c = token.clone();
+                    set.spawn(async move { check_worker_ip(ip, host_c, token_c).await });
+                }
+            }
+        }
+    }
+
     Ok(false)
 }
+
+/// 抽离出的单 IP 检查逻辑 (提供给 JoinSet 进行并发执行)
+async fn check_worker_ip(ip: String, host: String, token: String) -> bool {
+    let addr: SocketAddr = match format!("{ip}:{TEST_PORT}").parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    let client = match Client::builder()
+        .resolve(&host, addr)
+        .timeout(Duration::from_secs(3))
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("worker_health: failed to build client for {ip}: {e}");
+            return false;
+        }
+    };
+
+    let url = match lib::http::UrlBuilder::new()
+        .https(false)
+        .host(host.as_str())
+        .port(TEST_PORT)
+        .path("/health")
+        .build()
+    {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    let resp = match client.get(url).bearer_auth(&token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("worker_health: {ip} failed: {e}");
+            return false;
+        }
+    };
+
+    let status = resp.status();
+    match resp.bytes().await {
+        Ok(body) if default_matcher(status, &body) => true,
+        Ok(_) => {
+            eprintln!("worker_health: {ip} matcher failed (status {status})");
+            false
+        }
+        Err(e) => {
+            eprintln!("worker_health: {ip} read body failed: {e}");
+            false
+        }
+    }
+}
+
 
 /// domain 不允许携带端口：worker 侧密钥派生基于纯 host，带端口会导致
 /// token 不匹配（全链路 401）。与 Proxy::new 的校验保持一致。
