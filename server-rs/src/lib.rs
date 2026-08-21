@@ -20,7 +20,7 @@ use lib::algo::{decode_chunk, encode_chunk, ProxyAead, ProxyCompressor};
 use lib::base::{Base64, Encoder};
 use lib::frames::{make_frame, Frame, FrameCache};
 use lib::http::{parse_head, UrlBuilder};
-use lib::tool::token_anth;
+use lib::tool::token_auth;
 use lib::tool::{derive_keys, DerivedKeys};
 use lib::ws::{calc_sec_ws_accept, WsFrame, WsTunnelMsg};
 
@@ -37,7 +37,7 @@ async fn middleware(
             if let Ok(var) = var.to_str() {
                 if let Some(token) = var.strip_prefix("Bearer ") {
                     let now = Date::now().as_millis();
-                    if token_anth(token, state.token_base, now) {
+                    if token_auth(token, &state.token_base, now) {
                         return Ok(next.run(req).await);
                     }
                 }

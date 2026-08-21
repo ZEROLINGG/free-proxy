@@ -1,3 +1,5 @@
+use crate::aead::{Aes128Gcm, Cipher};
+use crate::base::{Base91, Encoder};
 use crate::hash::{Blake3, Hasher};
 use crate::kdf::{HkdfSha256, Kdf, Pbkdf2HmacSha256};
 use anyhow::anyhow;
@@ -13,62 +15,38 @@ pub fn xoroshiro128(s: u128) -> u128 {
     ((s0 as u128) << 64) | (s1 as u128)
 }
 
-pub fn dexoroshiro128(s: u128) -> u128 {
-    let out0 = (s >> 64) as u64;
-    let out1 = s as u64;
-
-    let s1_step1 = out1.rotate_right(37);
-    let s0_orig = (out0 ^ s1_step1 ^ (s1_step1 << 16)).rotate_right(24);
-
-    let s1_orig = s1_step1 ^ s0_orig;
-
-    ((s0_orig as u128) << 64) | (s1_orig as u128)
-}
-
-pub fn token_anth<D: AsRef<[u8]>>(token_tmp: &str, token_base: D, now: u64) -> bool {
-    if let Ok(x) = hex::decode(token_tmp) {
-        let y: &[u8] = token_base.as_ref();
-        let mut z = [0u8; 16];
-        for i in 0..16 {
-            let y_byte = y.get(i).copied().unwrap_or(0);
-            let x_byte = x.get(i).copied().unwrap_or(0);
-            z[i] = x_byte ^ y_byte;
-        }
-
-        let mut data = u128::from_be_bytes(z);
-        for _ in 0..6 {
-            data = dexoroshiro128(data);
-        }
-
-        let num = data as u64;
-        let nonce = (data >> 64) as u64;
-        if nonce != 0 {
-            if now.abs_diff(num) < 30_000 {
-                return true;
-            }
+pub fn token_auth(token_tmp: &str, token_base: &[u8; 16], now: u64) -> bool {
+    let encrypted_data = match Base91::decode(token_tmp) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    let decrypted_payload = match Aes128Gcm::decrypt(encrypted_data, token_base.as_ref()) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    if decrypted_payload.len() != 16 {
+        return false;
+    }
+    let nonce_bytes: [u8; 8] = decrypted_payload[0..8].try_into().unwrap();
+    let time_bytes: [u8; 8] = decrypted_payload[8..16].try_into().unwrap();
+    let nonce = u64::from_be_bytes(nonce_bytes);
+    let token_time = u64::from_be_bytes(time_bytes);
+    if nonce != 0 {
+        if now.abs_diff(token_time) < 30_000 {
+            return true;
         }
     }
     false
 }
-pub fn token_gen<D: AsRef<[u8]>>(token_base: D, now: u64, nonce: u64) -> String {
-    let final_data = ((nonce as u128) << 64) | (now as u128);
+pub fn token_gen(token_base: &[u8; 16], now: u64, nonce: u64) -> String {
+    let mut payload = [0u8; 16];
+    payload[0..8].copy_from_slice(&nonce.to_be_bytes());
+    payload[8..16].copy_from_slice(&now.to_be_bytes());
 
-    let mut data = final_data;
-    for _ in 0..6 {
-        data = xoroshiro128(data);
+    match Aes128Gcm::encrypt(&payload, token_base.as_ref()) {
+        Ok(encrypted) => Base91::encode(encrypted).unwrap_or_default(),
+        Err(_) => String::new(),
     }
-
-    let z = data.to_be_bytes();
-
-    let y = token_base.as_ref();
-    let mut x = [0u8; 16];
-
-    for i in 0..16 {
-        let y_byte = y.get(i).copied().unwrap_or(0);
-        x[i] = z[i] ^ y_byte;
-    }
-
-    hex::encode(x)
 }
 
 #[cfg(feature = "client")]
