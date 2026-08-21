@@ -186,6 +186,7 @@ free-proxy/
 ├── server-rs/            # Cloudflare Worker（Rust 编译到 wasm32）
 │   ├── wrangler.toml
 │   └── src/lib.rs        # /api/{version}/{target} HTTP 代理、/ws/{version}/{target} WS 隧道、/subscribe 订阅、/health
+├── client_cli/           # 命令行客户端
 └── client_tauri/         # Tauri 2 + React 19 客户端（桌面 + Android）
     ├── src/              # 前端页面与状态（Dashboard / 代理 / 测速 / CA）
     └── src-tauri/        # 本地代理、CA 安装、测速等 Tauri 命令
