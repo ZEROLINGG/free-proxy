@@ -2,6 +2,10 @@ use std::collections::VecDeque;
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Serialize, Deserialize};
 
+use crate::base::{Base64,Encoder};
+use crate::hash::{Sha1,Hasher};
+
+
 
 const MAX_WS_PAYLOAD_LEN: u64 = 64 * 1024 * 1024; // 64 MiB
 
@@ -490,3 +494,9 @@ impl WsCache {
 
 
 
+pub fn calc_sec_ws_accept(ws_key: &str) -> String {
+    const MAGIC_GUID: &'static str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    let concat_str = format!("{}{}", ws_key, MAGIC_GUID);
+    let sha1_digest = Sha1::digest_vec(concat_str);
+    Base64::encode(sha1_digest).expect("calc_sec_ws_accept Base64 编码失败")
+}

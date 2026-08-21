@@ -30,9 +30,11 @@ p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh"
 p384 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "getrandom"] }
 
 # hash
+sha1 = "0.11"
 sha2 = "0.11"
 blake3 = "1.8"
 hex = "0.4"
+digest = "0.11"
 
 # kdf
 pbkdf2 = { version = "0.13", features = ["hmac"] }

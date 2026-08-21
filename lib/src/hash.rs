@@ -7,7 +7,7 @@ macro_rules! impl_hasher {
     ($struct:ty, $hasher_type:ty) => {
         impl Hasher for $struct {
             fn digest_vec<T: AsRef<[u8]>>(input: T) -> Vec<u8> {
-                use sha2::Digest;
+                use digest::Digest;
                 let mut hasher = <$hasher_type>::new();
                 hasher.update(input.as_ref());
                 hasher.finalize().to_vec()
@@ -20,6 +20,11 @@ macro_rules! impl_hasher {
     };
 }
 
+// ====== SHA-1 实现 ======
+pub struct Sha1;
+impl_hasher!(Sha1, sha1::Sha1);
+
+// ====== SHA-2 系列实现 ======
 pub struct Sha256;
 impl_hasher!(Sha256, sha2::Sha256);
 
@@ -29,8 +34,8 @@ impl_hasher!(Sha512, sha2::Sha512);
 pub struct Sha512_256;
 impl_hasher!(Sha512_256, sha2::Sha512_256);
 
+// ====== Blake3 实现 ======
 pub struct Blake3;
-
 impl Hasher for Blake3 {
     fn digest_vec<T: AsRef<[u8]>>(input: T) -> Vec<u8> {
         blake3::hash(input.as_ref()).as_bytes().to_vec()
@@ -66,29 +71,43 @@ mod tests {
         );
     }
 
+    // 辅助函数：运行所有的通用测试
+    fn run_all_generic_tests<H: Hasher>(label: &str) {
+        test_deterministic::<H>(label);
+        test_diff_input::<H>(label);
+        test_hex_output::<H>(label);
+    }
+
+    #[test]
+    fn test_sha1() {
+        run_all_generic_tests::<Sha1>("sha1");
+    }
+
     #[test]
     fn test_sha256() {
-        test_deterministic::<Sha256>("sha256");
-        test_diff_input::<Sha256>("sha256");
-        test_hex_output::<Sha256>("sha256");
+        run_all_generic_tests::<Sha256>("sha256");
     }
 
     #[test]
     fn test_sha512() {
-        test_deterministic::<Sha512>("sha512");
-        test_diff_input::<Sha512>("sha512");
+        run_all_generic_tests::<Sha512>("sha512");
     }
 
     #[test]
     fn test_sha512_256() {
-        test_deterministic::<Sha512_256>("sha512_256");
+        run_all_generic_tests::<Sha512_256>("sha512_256");
     }
 
     #[test]
     fn test_blake3() {
-        test_deterministic::<Blake3>("blake3");
-        test_diff_input::<Blake3>("blake3");
-        test_hex_output::<Blake3>("blake3");
+        run_all_generic_tests::<Blake3>("blake3");
+    }
+
+    #[test]
+    fn test_known_sha1_vector() {
+        // SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
+        let hex = Sha1::digest_hex(b"abc");
+        assert_eq!(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]
