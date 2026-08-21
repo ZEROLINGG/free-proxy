@@ -128,6 +128,8 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 
 ### 普通Http请求
 
+普通 HTTP 请求走 `/api/{version}/{target}` 转发。
+
 ```
 浏览器
   │  （HTTP/HTTPS 明文交给本地客户端）
@@ -138,12 +140,13 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 ```
 
 - 浏览器把流量交给本地客户端；
-- 客户端**压缩 + 加密**后，通过你的免费 Worker 转发到目标网站；
-- Worker 拿到网站响应，再加密传回客户端解密，写回浏览器。
+- 客户端**压缩 + 加密**后，通过Worker转发到目标网站；
+- Worker 拿到网站响应，再加密传回客户端解密，写回浏览器；
+- 通过http2请求worker。
 
 ### WebSocket 隧道
 
-普通 HTTP 请求走 `/api/{version}/{target}` 转发；浏览器发起 `ws://` / `wss://` 升级请求时，会自动切换到独立的 WebSocket 隧道（`/ws/{version}/{target}`）：
+浏览器发起 `ws://` / `wss://` 升级请求时，会自动切换到独立的 WebSocket 隧道（`/ws/{version}/{target}`）：
 
 ```
 浏览器 ── ws/wss 升级请求 + RFC 6455 帧 ──▶ 本地客户端 ── 加密隧道消息 ──▶ Worker ──▶ 上游 WS 服务器
@@ -209,7 +212,6 @@ cargo test -p lib
 - 密钥由 `auth_key + domain` 经 PBKDF2/HKDF 派生，客户端与 Worker 两端独立推导出同一组密钥，无需网络传输密钥；
 - 每次请求的认证令牌由可逆 xoroshiro128 混淆 + 时间戳 + nonce 组成，服务端仅接受 ±30 秒内的令牌；
 - 本地 CA 私钥使用设备唯一标识 + 随机盐派生密钥加密存储，换设备需重新导入证书。
-- 使用http2请求worker
 
 
 
