@@ -1,5 +1,6 @@
+// lib/src/ws.rs
 use std::collections::VecDeque;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use serde::{Serialize, Deserialize};
 
 use crate::base::{Base64,Encoder};
@@ -406,6 +407,7 @@ impl WsFrame {
 }
 
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WsData {
     Text(String),
     Binary(Vec<u8>),
@@ -499,4 +501,28 @@ pub fn calc_sec_ws_accept(ws_key: &str) -> String {
     let concat_str = format!("{}{}", ws_key, MAGIC_GUID);
     let sha1_digest = Sha1::digest_vec(concat_str);
     Base64::encode(sha1_digest).expect("calc_sec_ws_accept Base64 编码失败")
+}
+
+// Worker代理ws时中间转发的数据
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum WsTunnelMsg {
+    HeadFrame(Vec<u8>), // 原始ws升级请求
+    Text(String),
+    Binary(Vec<u8>),
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Close(Option<(u16,Option<String>)>),
+    Return(Vec<u8>),     // 下行的可直接写入tcp的数据
+    Error(String)
+}
+
+impl WsTunnelMsg {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        postcard::to_allocvec(self)
+            .map_err(|e| anyhow!("WsTunnelMsg serialize failed: {e}"))
+    }
+    pub fn deserialize(data: &[u8]) -> Result<Self> {
+        postcard::from_bytes(data)
+            .map_err(|e| anyhow!("WsTunnelMsg deserialize failed: {e}"))
+    }
 }

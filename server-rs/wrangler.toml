@@ -1,6 +1,11 @@
 name = "free-proxy"
 main = "build/index.js"
 compatibility_date = "2026-08-08"
+# 关键：compatibility_date >= 2026-03-17 时 websocket_standard_binary_type 默认启用，
+# workerd 会把二进制 WS 消息以 Blob 投递，而 worker crate 的 MessageEvent::bytes()
+# 只认 ArrayBuffer（Uint8Array::new(blob) 读不出内容）→ 客户端头帧会变成"空消息"。
+# 用官方回退标志恢复 ArrayBuffer 投递（worker crate 0.8 按此设计）。
+compatibility_flags = ["no_websocket_standard_binary_type"]
 
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"

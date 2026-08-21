@@ -1,6 +1,6 @@
 # free-proxy — 零成本私人独享代理
 
-> 不用买 VPS、不用买域名、不用备案，只用 **Cloudflare 免费的 Worker**，就能部署一个**只属于你自己的**代理节点。
+> 不用买 VPS、不用买域名、不用备案，只用 **Cloudflare 免费的 Worker**，就能部署一个私人且几乎无限流量的代理节点。
 
 ---
 
@@ -11,6 +11,7 @@
 - **服务端**跑在 Cloudflare Worker 上——这是 Cloudflare 的**免费**服务，按免费额度提供日常请求量，个人上网绰绰有余；
 - **客户端**是桌面 / 手机上的一个小应用，负责加密、压缩、加速，并把流量交给你的 Worker 转发。
 
+<div><img alt="" src="./image/screenshot-20260821-194431.png"></div>
 <div><img alt="" src="./image/screenshot-20260818-164913.png"></div>
 
 ### 它能给你带来什么
@@ -21,6 +22,7 @@
 - **更安全**：多种加密算法可选（AES-GCM / ChaCha20-Poly1305 等），传输内容被加密；
 - **自动挑最快的路**：内置「优选 IP」测速工具，帮你找到与 Worker 之间最快的网络路径；
 - **全家桶通用**：客户端可一键导出订阅链接，Clash / sing-box / v2rayN 等工具都能用；
+- **实时应用也支持**：内置 WebSocket 隧道，聊天 / 推送 / 在线协作等基于 `ws://` / `wss://` 的应用同样走加密代理；
 - **跨平台**：桌面（Windows / macOS / Linux）+ 手机（Android，iOS 实验性支持）。
 
 ---
@@ -122,6 +124,8 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 
 ## 六、工作原理
 
+### 普通Http请求
+
 ```
 浏览器
   │  （HTTP/HTTPS 明文交给本地客户端）
@@ -135,6 +139,23 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 - 客户端**压缩 + 加密**后，通过你的免费 Worker 转发到目标网站；
 - Worker 拿到网站响应，再加密传回客户端解密，写回浏览器。
 
+### WebSocket 隧道
+
+普通 HTTP 请求走 `/api/{version}/{target}` 转发；浏览器发起 `ws://` / `wss://` 升级请求时，会自动切换到独立的 WebSocket 隧道（`/ws/{version}/{target}`）：
+
+```
+浏览器 ── ws/wss 升级请求 + RFC 6455 帧 ──▶ 本地客户端 ── 加密隧道消息 ──▶ Worker ──▶ 上游 WS 服务器
+   ▲                                                                                   │
+   └────────── 原始 WS 帧（101 响应头 / 数据帧 / close 帧）零解析回写 ───────────────┘
+```
+
+- **本地客户端**负责 RFC 6455 协议细节：帧解析、掩码解掩码、分片重组；浏览器的 Ping 帧本地直接回 Pong，不占用隧道带宽；
+- **Worker 端**与上游完成真正的 WebSocket 握手（含按客户端 key 计算 `Sec-WebSocket-Accept`），之后全双工转发，浏览器收到的仍是原始 WS 帧，text / binary / close 语义完整保留；
+- **保活**：隧道侧每 60 秒发一次 Ping（低于 Cloudflare 约 100 秒的空闲断开阈值），避免长连接被空闲回收；
+- 升级请求必须走 HTTP/1.1（HTTP/2 不支持 Upgrade 语义），客户端连接 Worker 的隧道通道已强制 HTTP/1.1。
+
+### 请求核心
+通过worker::Fetch 接口发送请求，而不是worker::Socket，不受限制，可以连接使用了cf服务的站点，能够解锁更多内容。
 
 
 ---
@@ -154,11 +175,12 @@ free-proxy/
 │       ├── compress.rs   # zstd / gzip / lz4
 │       ├── kdf.rs        # PBKDF2 / scrypt / HKDF
 │       ├── tool.rs       # 密钥派生、时间窗令牌、异或混淆
-│       └── proxy/        # 客户端本地代理 + MITM TLS（tls.rs）
+│       ├── ws.rs         # WebSocket 协议层：RFC 6455 帧解析 / 分片重组 / 隧道消息（WsTunnelMsg）
+│       └── proxy/        # 客户端本地代理 + MITM TLS（tls.rs）+ WS 隧道（ws.rs）
 │       └── speed_test/   # tcping / health 两阶段优选 IP 测速
 ├── server-rs/            # Cloudflare Worker（Rust 编译到 wasm32）
 │   ├── wrangler.toml
-│   └── src/lib.rs        # /api/{version}/{target} 代理端点、/subscribe 订阅、/health
+│   └── src/lib.rs        # /api/{version}/{target} HTTP 代理、/ws/{version}/{target} WS 隧道、/subscribe 订阅、/health
 └── client_tauri/         # Tauri 2 + React 19 客户端（桌面 + Android）
     ├── src/              # 前端页面与状态（Dashboard / 代理 / 测速 / CA）
     └── src-tauri/        # 本地代理、CA 安装、测速等 Tauri 命令
@@ -189,7 +211,6 @@ cargo test -p lib
 
 ### Roadmap / 已知限制
 
-- `ws`（WebSocket / 升级隧道）支持尚未完成；
 - iOS 端尚未适配；
 
 

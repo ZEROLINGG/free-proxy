@@ -23,6 +23,35 @@ impl ReqHeader {
     pub fn is_connect(&self) -> bool {
         self.method.eq_ignore_ascii_case("CONNECT")
     }
+
+    /// 判断是否为 WebSocket 升级请求
+    /// 条件: Connection 头包含 "upgrade" 且 Upgrade 头值为 "websocket"（不区分大小写）
+    pub fn is_websocket_upgrade(&self) -> bool {
+        let mut has_upgrade_connection = false;
+        let mut has_websocket_upgrade = false;
+        for (k, v) in &self.headers {
+            if k.eq_ignore_ascii_case("connection") {
+                if v.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade")) {
+                    has_upgrade_connection = true;
+                }
+            }
+            if k.eq_ignore_ascii_case("upgrade") && v.trim().eq_ignore_ascii_case("websocket") {
+                has_websocket_upgrade = true;
+            }
+        }
+        has_upgrade_connection && has_websocket_upgrade
+    }
+
+    /// 提取 Sec-WebSocket-Key 头的值
+    pub fn websocket_key(&self) -> Option<&str> {
+        self.headers.iter().find_map(|(k, v)| {
+            if k.eq_ignore_ascii_case("sec-websocket-key") {
+                Some(v.trim())
+            } else {
+                None
+            }
+        })
+    }
 }
 
 pub struct HeaderPaser {
@@ -571,6 +600,39 @@ mod tests {
         assert!(UrlBuilder::new().host("").build().is_err());
         assert!(UrlBuilder::new().host("example.com:").build().is_err());
         assert!(UrlBuilder::new().host(":8080").build().is_err());
+    }
+
+    #[test]
+    fn test_req_header_websocket_upgrade() {
+        let req = ReqHeader {
+            method: "GET".to_string(),
+            path: "/chat".to_string(),
+            version: 1,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Upgrade".to_string(), "websocket".to_string()),
+                ("Connection".to_string(), "keep-alive, Upgrade".to_string()),
+                ("Sec-WebSocket-Key".to_string(), "dGhlIHNhbXBsZSBub25jZQ==".to_string()),
+            ],
+            raw: BytesMut::new(),
+        };
+
+        assert!(req.is_websocket_upgrade());
+        assert_eq!(req.websocket_key(), Some("dGhlIHNhbXBsZSBub25jZQ=="));
+
+        let non_ws = ReqHeader {
+            method: "GET".to_string(),
+            path: "/index.html".to_string(),
+            version: 1,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Connection".to_string(), "keep-alive".to_string()),
+            ],
+            raw: BytesMut::new(),
+        };
+
+        assert!(!non_ws.is_websocket_upgrade());
+        assert_eq!(non_ws.websocket_key(), None);
     }
 }
 

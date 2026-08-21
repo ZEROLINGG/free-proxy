@@ -228,6 +228,11 @@ impl ProxyAlgo {
     pub fn api_path(self) -> String {
         format!("/api/{}/{}", self.compressor.version(), self.aead.target())
     }
+
+    /// 生成 worker WebSocket 路径 /ws/{version}/{target}
+    pub fn ws_path(self) -> String {
+        format!("/ws/{}/{}", self.compressor.version(), self.aead.target())
+    }
 }
 
 /// 编码管线：先压缩后加密（客户端上行 / 服务端响应块共用）。
@@ -276,6 +281,26 @@ mod tests {
         assert_eq!(
             ProxyAlgo::new(ProxyCompressor::None, ProxyAead::None).api_path(),
             "/api/v4/get"
+        );
+    }
+
+    #[test]
+    fn test_ws_path_mapping() {
+        assert_eq!(
+            ProxyAlgo::new(ProxyCompressor::Zstd, ProxyAead::Aes128Gcm).ws_path(),
+            "/ws/v1/auth"
+        );
+        assert_eq!(
+            ProxyAlgo::new(ProxyCompressor::Gzip, ProxyAead::Aes256Gcm).ws_path(),
+            "/ws/v2/login"
+        );
+        assert_eq!(
+            ProxyAlgo::new(ProxyCompressor::Lz4, ProxyAead::XChaCha20Poly1305).ws_path(),
+            "/ws/v3/log"
+        );
+        assert_eq!(
+            ProxyAlgo::new(ProxyCompressor::None, ProxyAead::None).ws_path(),
+            "/ws/v4/get"
         );
     }
 

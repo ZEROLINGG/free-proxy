@@ -13,4 +13,4 @@ pub mod tool;
 pub mod proxy;
 #[cfg(feature = "client")]
 pub mod speed_test;
-mod ws;
+pub mod ws;
