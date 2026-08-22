@@ -774,7 +774,6 @@ dependencies = [
  "lib",
  "rand 0.10.2",
  "reqwest",
- "reqwest-websocket",
  "resvg",
  "serde",
  "serde_json",

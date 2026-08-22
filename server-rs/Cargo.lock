@@ -516,13 +516,12 @@ dependencies = [
 
 [[package]]
 name = "free-proxy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
  "axum",
  "futures-util",
- "hex",
  "lib",
  "serde",
  "tower-service",

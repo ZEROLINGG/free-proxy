@@ -6,3 +6,4 @@
     "client-android-dev": "cd client_tauri && pnpm tauri android dev"
   }
 }
+
