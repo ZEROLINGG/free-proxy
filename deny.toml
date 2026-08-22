@@ -1,0 +1,71 @@
+# cargo-deny 共享配置：四个独立 crate（lib/ client_cli/ client_tauri/src-tauri/ server-rs/）
+# 均从此文件读取（cargo-deny 会沿目录向上查找）。在任意 crate 目录下运行：
+#   cargo deny check licenses advisories
+
+[licenses]
+version = 2
+
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  # servo/cssparser 栈（wry→tauri）与 dirs→option-ext
+  "MPL-2.0",
+  # clipboard-win / error-code（Tauri Windows 剪贴板栈）
+  "BSL-1.0",
+]
+
+# ring 的 LICENSE 是自定义 ISC 变体（无 SPDX 字段），按上游实际授权声明
+[[licenses.clarify]]
+name = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[advisories]
+version = 2
+ignore = [
+  # RUSTSEC-2023-0089: atomic-polyfill 失维护（仅警告，非漏洞）。
+  # 引入链：postcard 1.1.x（当前最新）→ heapless 0.7 硬依赖；heapless 0.8 才改用 portable-atomic。
+  # 等 postcard 升级 heapless 后删除此条目。
+  "RUSTSEC-2023-0089",
+
+  # ---- 以下均为 client_tauri（Linux webview 栈）传递依赖的 unmaintained 警告，非漏洞 ----
+  # GTK3 绑定全家桶：tauri-plugin-single-instance → gtk → atk/gdk/glib/pango…
+  # 上游 Tauri 仍在使用，无法从我们这边消除；等 Tauri 迁移后删除。
+  "RUSTSEC-2024-0411",
+  "RUSTSEC-2024-0412",
+  "RUSTSEC-2024-0413",
+  "RUSTSEC-2024-0414",
+  "RUSTSEC-2024-0415",
+  "RUSTSEC-2024-0416",
+  "RUSTSEC-2024-0417",
+  "RUSTSEC-2024-0418",
+  "RUSTSEC-2024-0419",
+  "RUSTSEC-2024-0420",
+  # proc-macro-error：glib/tauri 宏栈依赖，上游无替代迁移
+  "RUSTSEC-2024-0370",
+  # paste：glib 派生宏依赖
+  "RUSTSEC-2024-0436",
+  # unic-* 系列：cssparser/selectors（wry webview）依赖
+  "RUSTSEC-2025-0075",
+  "RUSTSEC-2025-0080",
+  "RUSTSEC-2025-0081",
+  "RUSTSEC-2025-0098",
+  "RUSTSEC-2025-0100",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,6 +1,7 @@
 [package]
 name = "client_cli"
 version = "0.2.1"
+license = "MIT OR Apache-2.0"
 edition = "2021"
 authors = ["ZEROLINGG <bcsz8833221@gmail.com>"]
 
