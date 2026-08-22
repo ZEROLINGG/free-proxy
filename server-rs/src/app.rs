@@ -1,0 +1,79 @@
+// server-rs：Axum 应用装配（状态、鉴权、路由）。
+use axum::http::{Method, StatusCode};
+use axum::response::Response;
+use axum::{extract::Request, extract::State, middleware::Next};
+use axum::{routing::get, routing::post, Router};
+use std::sync::Arc;
+use worker::{Context, Date};
+
+use lib::tool::{token_auth, DerivedKeys};
+
+use crate::proxy_http::proxy;
+use crate::proxy_ws::proxy_ws;
+use crate::subscribe::subscribe;
+
+#[derive(Clone)]
+pub(crate) struct AppState {
+    pub(crate) keys: DerivedKeys,
+    pub(crate) ctx: Arc<Context>,
+}
+
+/// 基于时间戳的 Bearer Token 鉴权中间件，防重放。
+pub(crate) async fn auth_middleware(
+    State(state): State<DerivedKeys>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let method = req.method();
+    if method.eq(&Method::GET) || method.eq(&Method::POST) {
+        if let Some(var) = req.headers().get("Authorization") {
+            if let Ok(var) = var.to_str() {
+                if let Some(token) = var.strip_prefix("Bearer ") {
+                    let now = Date::now().as_millis();
+                    if token_auth(token, &state.token_base, now) {
+                        return Ok(next.run(req).await);
+                    }
+                }
+            }
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+pub(crate) fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(|| async { "Hello, World!" }))
+        .route(
+            "/health",
+            get(|| async { Date::now().as_millis().to_string() }),
+        )
+        .route("/api/{version}/{target}", post(proxy))
+        .route("/ws/{version}/{target}", get(proxy_ws))
+        .layer(axum::middleware::from_fn_with_state(
+            state.keys.clone(),
+            auth_middleware,
+        ))
+        .with_state(state)
+        .route("/subscribe/{port}", get(subscribe))
+        .fallback(|| async { "not found" })
+}
+
+/// HTTP 状态码 -> Reason Phrase，proxy_http / proxy_ws 共用。
+pub(crate) fn status_text(code: u16) -> &'static str {
+    StatusCode::from_u16(code)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("Unknown")
+}
+
+#[macro_export]
+macro_rules! error {
+    // 匹配: error!(BAD_REQUEST, "静态字符串")
+    ($code:ident, $msg:literal) => {
+        (axum::http::StatusCode::$code, $msg.to_string())
+    };
+    // 匹配: error!(BAD_REQUEST, "格式化 {} {}", a, b)
+    ($code:ident, $($arg:tt)*) => {
+        (axum::http::StatusCode::$code, format!($($arg)*))
+    };
+}

@@ -13,14 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ========== Job 1: 创建空 draft Release（唯一创建者 + 自动 changelog） ==========
+  # ========== Job 1: 创建空 draft Release ==========
   create-release:
     name: Create draft release
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      # 防呆：tag 版本必须与 tauri.conf.json 的 version 一致
+      # tag 版本必须与 tauri.conf.json 的 version 一致
       - name: Verify version matches tag
         run: |
           CONF_VERSION=$(jq -r .version client_tauri/src-tauri/tauri.conf.json)
@@ -33,7 +33,7 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           draft: true
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           generate_release_notes: true
@@ -96,7 +96,7 @@ jobs:
           releaseAssetNamePattern: ${{ matrix.platform.pattern }}
           args: ${{ matrix.platform.args }}
 
-  # ========== Job 3: Rust CLI（与 Tauri 并行上传） ==========
+  # ========== Job 3: Rust CLI ==========
   build-cli:
     name: Build CLI (${{ matrix.platform.name }})
     needs: create-release
@@ -137,95 +137,95 @@ jobs:
           draft: true
           files: ${{ env.ASSET_NAME }}
 
-  # ========== Job 4: Android 客户端（universal 签名 APK） ==========
-  build-android:
-    name: Build Android APK
-    needs: create-release
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
+#  # ========== Job 4: Android 客户端 ==========
+#  build-android:
+#    name: Build Android APK
+#    needs: create-release
+#    runs-on: ubuntu-24.04
+#    steps:
+#      - uses: actions/checkout@v6
+#
+#      - name: Setup Node.js 22
+#        uses: actions/setup-node@v6
+#        with:
+#          node-version: '22'
+#
+#      - name: Setup pnpm 10
+#        uses: pnpm/action-setup@v6
+#        with:
+#          version: 10
+#
+#      - name: Setup Java 17
+#        uses: actions/setup-java@v4
+#        with:
+#          distribution: temurin
+#          java-version: '17'
+#
+#      - name: Setup Android SDK
+#        uses: android-actions/setup-android@v3
+#
+#      - name: Install Android SDK components
+#        run: |
+#          sdkmanager --install "platform-tools" \
+#            "platforms;android-36" "build-tools;36.0.0" \
+#            "ndk;27.3.13750724"
+#          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+#          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+#
+#      - name: Setup Rust (Android targets)
+#        uses: dtolnay/rust-toolchain@stable
+#        with:
+#          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+#
+#      - name: Cache Rust dependencies
+#        uses: Swatinem/rust-cache@v2
+#        with:
+#          workspaces: './client_tauri/src-tauri -> target'
+#
+#      - name: Install frontend dependencies
+#        working-directory: ./client_tauri
+#        run: pnpm install --frozen-lockfile
+#
+#      - name: Regenerate Android project (fix absolute paths)
+#        working-directory: ./client_tauri
+#        run: pnpm tauri android init --ci
+#
+#      - name: Setup Android signing
+#        env:
+#          KEYSTORE_B64:  ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+#          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+#          KEY_ALIAS:     ${{ secrets.ANDROID_KEY_ALIAS }}
+#          KEY_PASS:      ${{ secrets.ANDROID_KEY_PASSWORD }}
+#        run: |
+#          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/free-proxy.jks"
+#          cat > client_tauri/src-tauri/gen/android/keystore.properties <<EOF
+#          storeFile=$RUNNER_TEMP/free-proxy.jks
+#          storePassword=$KEYSTORE_PASS
+#          keyAlias=$KEY_ALIAS
+#          keyPassword=$KEY_PASS
+#          EOF
+#
+#      - name: Build Android APK
+#        working-directory: ./client_tauri
+#        env:
+#          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+#        run: pnpm tauri android build --apk --ci
+#
+#      - name: Rename APK
+#        run: |
+#          VERSION=${GITHUB_REF_NAME#v}
+#          cp client_tauri/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+#             free-proxy_gui_android_universal_${VERSION}.apk
+#          echo "ASSET_NAME=free-proxy_gui_android_universal_${VERSION}.apk" >> "$GITHUB_ENV"
+#
+#      - name: Upload APK to Release
+#        uses: softprops/action-gh-release@v3
+#        with:
+#          tag_name: ${{ github.ref_name }}
+#          draft: true
+#          files: ${{ env.ASSET_NAME }}
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-
-      - name: Setup pnpm 10
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        run: |
-          sdkmanager --install "platform-tools" \
-            "platforms;android-36" "build-tools;36.0.0" \
-            "ndk;27.3.13750724"
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
-
-      - name: Setup Rust (Android targets)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: './client_tauri/src-tauri -> target'
-
-      - name: Install frontend dependencies
-        working-directory: ./client_tauri
-        run: pnpm install --frozen-lockfile
-
-      - name: Regenerate Android project (fix absolute paths)
-        working-directory: ./client_tauri
-        run: pnpm tauri android init --ci
-
-      - name: Setup Android signing
-        env:
-          KEYSTORE_B64:  ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS:     ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASS:      ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/free-proxy.jks"
-          cat > client_tauri/src-tauri/gen/android/keystore.properties <<EOF
-          storeFile=$RUNNER_TEMP/free-proxy.jks
-          storePassword=$KEYSTORE_PASS
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEY_PASS
-          EOF
-
-      - name: Build Android APK
-        working-directory: ./client_tauri
-        env:
-          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
-        run: pnpm tauri android build --apk --ci
-
-      - name: Rename APK
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          cp client_tauri/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
-             free-proxy_gui_android_universal_${VERSION}.apk
-          echo "ASSET_NAME=free-proxy_gui_android_universal_${VERSION}.apk" >> "$GITHUB_ENV"
-
-      - name: Upload APK to Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          draft: true
-          files: ${{ env.ASSET_NAME }}
-
-  # ========== Job 5: Worker 服务端（成品 zip，供用户自行部署） ==========
+  # ========== Job 5: Worker 服务端 ==========
   build-worker:
     name: Build Worker bundle (zip)
     needs: create-release
