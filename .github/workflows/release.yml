@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ========== Job 1: 创建空 draft Release ==========
+  # ========== Job 1: 创建空 Release ==========
   create-release:
-    name: Create draft release
+    name: Create release
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -34,7 +34,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          draft: true
+#          draft: true
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           generate_release_notes: true
 

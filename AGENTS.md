@@ -2,6 +2,170 @@
 
 Guidance for AI coding agents working in this repo. User-facing docs, code comments, and UI strings are written in Chinese — match that.
 
+## Directory Tree
+
+> `gen/`、`icons/`、`image/`、`logs/`、各 `Cargo.lock` 为构建产物、资源或运行时文件，通常无需修改。
+
+```
+./
+├── AGENTS.md
+├── client_cli/
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   └── src/
+│       ├── ca.rs
+│       ├── config.rs
+│       ├── health.rs
+│       ├── main.rs
+│       ├── run.rs
+│       ├── speed.rs
+│       └── subscribe.rs
+├── client_tauri/
+│   ├── index.html
+│   ├── package.json
+│   ├── pnpm-lock.yaml
+│   ├── postcss.config.js
+│   ├── public/
+│   ├── README.md
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── assets/
+│   │   ├── components/
+│   │   │   ├── layout/
+│   │   │   │   ├── BottomTabs.tsx
+│   │   │   │   ├── GlassTopbar.tsx
+│   │   │   │   ├── Layout.tsx
+│   │   │   │   └── Sidebar.tsx
+│   │   │   └── ui/
+│   │   │       ├── Badge.tsx
+│   │   │       ├── BottomSheet.tsx
+│   │   │       ├── Button.tsx
+│   │   │       ├── ColoredCta.tsx
+│   │   │       ├── Input.tsx
+│   │   │       ├── Panel.tsx
+│   │   │       ├── Progress.tsx
+│   │   │       ├── Segmented.tsx
+│   │   │       ├── Select.tsx
+│   │   │       ├── Spinner.tsx
+│   │   │       ├── Switch.tsx
+│   │   │       └── Toast.tsx
+│   │   ├── lib/
+│   │   │   ├── tauri.ts
+│   │   │   └── types.ts
+│   │   ├── main.tsx
+│   │   ├── pages/
+│   │   │   ├── About.tsx
+│   │   │   ├── CaCert.tsx
+│   │   │   ├── Dashboard.tsx
+│   │   │   ├── ProxySettings.tsx
+│   │   │   └── SpeedTest.tsx
+│   │   ├── store/
+│   │   │   ├── proxy.ts
+│   │   │   ├── settings.ts
+│   │   │   ├── speedTest.ts
+│   │   │   └── ui.ts
+│   │   ├── styles/
+│   │   │   └── globals.css
+│   │   └── vite-env.d.ts
+│   ├── src-tauri/
+│   │   ├── build.rs
+│   │   ├── capabilities/
+│   │   │   └── default.json
+│   │   ├── Cargo.lock
+│   │   ├── Cargo.toml
+│   │   ├── gen/
+│   │   │   ├── android/
+│   │   │   │   ├── app/
+│   │   │   │   ├── build.gradle.kts
+│   │   │   │   ├── buildSrc/
+│   │   │   │   ├── free-proxy.jks
+│   │   │   │   ├── gradle/
+│   │   │   │   ├── gradle.properties
+│   │   │   │   ├── gradlew*
+│   │   │   │   ├── gradlew.bat
+│   │   │   │   ├── keystore.properties
+│   │   │   │   ├── settings.gradle
+│   │   │   │   └── tauri.settings.gradle
+│   │   │   └── schemas/
+│   │   │       ├── acl-manifests.json
+│   │   │       ├── android-schema.json
+│   │   │       ├── capabilities.json
+│   │   │       ├── desktop-schema.json
+│   │   │       ├── linux-schema.json
+│   │   │       └── mobile-schema.json
+│   │   ├── icons/
+│   │   │   ├── 128x128@2x.png
+│   │   │   ├── 128x128.png
+│   │   │   ├── 32x32.png
+│   │   │   ├── 64x64.png
+│   │   │   ├── android/
+│   │   │   ├── free-proxy-on.svg
+│   │   │   ├── free-proxy.svg
+│   │   │   ├── icon.icns
+│   │   │   ├── icon.ico
+│   │   │   ├── icon.png
+│   │   │   ├── ios/
+│   │   │   ├── Square*.png
+│   │   │   └── StoreLogo.png
+│   │   ├── src/
+│   │   │   ├── commands/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── proxy.rs
+│   │   │   │   ├── settings.rs
+│   │   │   │   └── speed.rs
+│   │   │   ├── lib.rs
+│   │   │   ├── main.rs
+│   │   │   └── tray.rs
+│   │   └── tauri.conf.json
+│   ├── tsconfig.json
+│   ├── tsconfig.node.json
+│   └── vite.config.ts
+├── deny.toml
+├── image/
+├── lib/
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   └── src/
+│       ├── aead.rs
+│       ├── algo.rs
+│       ├── base.rs
+│       ├── compress.rs
+│       ├── ecc.rs
+│       ├── frames.rs
+│       ├── hash.rs
+│       ├── http.rs
+│       ├── kdf.rs
+│       ├── lib.rs
+│       ├── proxy/
+│       │   ├── body.rs
+│       │   ├── client.rs
+│       │   ├── connection.rs
+│       │   ├── mod.rs
+│       │   ├── relay.rs
+│       │   ├── tls.rs
+│       │   └── ws.rs
+│       ├── speed_test/
+│       │   ├── health.rs
+│       │   ├── ip.rs
+│       │   ├── mod.rs
+│       │   └── tcping.rs
+│       ├── tool.rs
+│       └── ws.rs
+├── logs/
+├── package.json
+├── README.md
+└── server-rs/
+    ├── Cargo.lock
+    ├── Cargo.toml
+    ├── src/
+    │   ├── app.rs
+    │   ├── lib.rs
+    │   ├── proxy_http.rs
+    │   ├── proxy_ws.rs
+    │   └── subscribe.rs
+    └── wrangler.toml
+```
+
 ## Build model (non-obvious)
 
 - Four **standalone crates, no root Cargo workspace**: `lib/`, `client_cli/`, `client_tauri/src-tauri/`, `server-rs/` (each has its own `target/`). Cargo commands must be run inside a crate directory — from the repo root they fail with "could not find Cargo.toml". In particular, README's `cargo test -p lib` only works if run from inside `lib/`.
