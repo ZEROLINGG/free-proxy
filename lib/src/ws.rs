@@ -159,7 +159,7 @@ impl WsFrame {
     }
 
     /// 构造 Close 帧
-    pub fn new_close(data: Option<(u16, Option<&str>)>, mask: Option<[u8; 4]>) -> Self {
+    pub fn new_close(data: Option<(u16, Option<String>)>, mask: Option<[u8; 4]>) -> Self {
         let mut payload = Vec::new();
         if let Some((code, reason_op)) = data {
             payload.extend_from_slice(&code.to_be_bytes());
@@ -208,19 +208,21 @@ impl WsFrame {
         self.opcode == WsOpCode::Pong
     }
 
-    /// 从 Close 帧中提取状态码
-    pub fn close_code(&self) -> Option<u16> {
-        if self.opcode == WsOpCode::Close && self.payload.len() >= 2 {
-            Some(u16::from_be_bytes([self.payload[0], self.payload[1]]))
-        } else {
-            None
+    /// 从 Close 帧中提取状态码和原因（如果存在）
+    pub fn close_info(&self) -> Option<(u16, Option<String>)> {
+        if self.opcode != WsOpCode::Close || self.payload.is_empty() {
+            return None;
         }
-    }
+        if self.payload.len() >= 2 {
+            let code = u16::from_be_bytes([self.payload[0], self.payload[1]]);
 
-    /// 从 Close 帧中提取原因文本
-    pub fn close_reason(&self) -> Option<&str> {
-        if self.opcode == WsOpCode::Close && self.payload.len() > 2 {
-            std::str::from_utf8(&self.payload[2..]).ok()
+            let reason = if self.payload.len() > 2 {
+                String::from_utf8(self.payload[2..].to_vec()).ok()
+            } else {
+                None
+            };
+
+            Some((code, reason))
         } else {
             None
         }

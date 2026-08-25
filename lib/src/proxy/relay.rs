@@ -462,3 +462,30 @@ pub(super) async fn write_502<S: AsyncWrite + Unpin>(stream: &mut S) -> Result<(
     stream.flush().await?;
     Ok(())
 }
+
+// 当前暂未支持该请求
+
+// curl --url 'https://speedtest12.hkbn.net.prod.hosts.ooklaserver.net:8080/upload?nocache=52469c20-c731-49a4-ac35-002b082605b7&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952' \
+//   -X 'POST' \
+//   -H 'Accept: */*' \
+//   -H 'Accept-Language: zh-HK,zh;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6,zh-CN;q=0.5,zh-TW;q=0.4' \
+//   -H 'Connection: keep-alive' \
+//   -H 'Content-Length: 25000000' \
+//   -H 'Content-type: application/octet-stream' \
+//   -H 'Origin: https://hkbntest.speedtestcustom.com' \
+//   -H 'Referer: https://hkbntest.speedtestcustom.com/' \
+//   -H 'Sec-Fetch-Dest: empty' \
+//   -H 'Sec-Fetch-Mode: cors' \
+//   -H 'Sec-Fetch-Site: cross-site' \
+//   -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36' \
+//   -H 'sec-ch-ua: "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"' \
+//   -H 'sec-ch-ua-mobile: ?0' \
+//   -H 'sec-ch-ua-platform: "Linux"'
+
+// upload?nocache=52469c20-c731-49a4-ac35-002b082605b7&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.10 秒
+// upload?nocache=62caaa5f-a098-4611-a083-e66b2caeb79f&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.05 秒
+// upload?nocache=088c62d1-cb47-40a4-952f-607f215783e9&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.05 秒
+// upload?nocache=6f509292-b2ab-4933-822e-cd4cef0556ac&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	12.89
+
+// 有可能触发了cpu限制
+// 有可能有多重kao bei

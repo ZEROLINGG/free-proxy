@@ -23,7 +23,7 @@ pub struct SpeedTestOpts {
 impl Default for SpeedTestOpts {
     fn default() -> Self {
         Self {
-            total: 8000,
+            total: 8001,
             tcping_limit: 96,
             tcping_timeout_ms: 500,
             health_limit: 32,

@@ -316,7 +316,7 @@ pub(crate) async fn proxy_ws(
                             WsTunnelMsg::Ping(_) | WsTunnelMsg::Pong(_) => {}
                             WsTunnelMsg::Close(c) => {
                                 match c {
-                                    Some((code, reason)) => { let _ = upstream_tx.close(Some(code), reason.as_deref()); }
+                                    Some((code, reason)) => { let _ = upstream_tx.close(Some(code), reason); }
                                     None => { let _ = upstream_tx.close(None, None::<&str>); }
                                 }
                                 break;
@@ -353,9 +353,9 @@ pub(crate) async fn proxy_ws(
                     WebsocketEvent::Close(c) => {
                         let code = c.code();
                         let reason = c.reason();
-                        let frame = WsFrame::new_close(Some((code, Some(reason.as_str()))), None);
+                        let frame = WsFrame::new_close(Some((code, Some(reason.clone()))), None);
                         ws_send_return(&server_tx_up, &frame.to_bytes(), compressor, aead, &key16, &key32);
-                        let _ = server_tx_up.close(Some(code), Some(reason.as_str()));
+                        let _ = server_tx_up.close(Some(code), Some(reason));
                         break;
                     }
                 }

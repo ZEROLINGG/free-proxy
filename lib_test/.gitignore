@@ -1,0 +1,31 @@
+/target
+/logs
+/.idea
+/.playwright-mcp
+
+# Node 依赖
+node_modules/
+
+# 编辑器/工具备份文件
+*.rs.[0-9]
+*~
+*.swp
+
+# 敏感文件
+.env
+.env.*
+.dev.*
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+client_tauri/src-tauri/gen/android/keystore.properties
+
+
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

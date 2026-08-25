@@ -10,9 +10,6 @@
 //   - 下行（worker → 浏览器）：收到 WsTunnelMsg::Return(Vec<u8>) 不解析，
 //     直接把原始字节（101 响应头 / 数据帧 / close 帧）写入本地 TCP。收到 Error 时，
 //     根据握手状态反馈 HTTP 502 或 WS Close 帧。
-//
-// 保活：隧道侧每 60s 发一次 Ping（tungstenite 读到 Ping 自动回 Pong，
-// 且 Pong 不会暴露给业务层），保持 worker 与上游两端连接活跃。
 
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, Bytes, BytesMut};
@@ -143,22 +140,29 @@ where
                 buf.advance(consumed);
 
                 if frame.is_ping() {
-                    // 浏览器 Ping：本地直接回 Pong，不占隧道
                     let pong = WsFrame::new_pong(frame.payload.clone(), None);
                     let mut w = wr_upload.lock().await;
                     w.write_all(&pong.to_bytes()).await?;
+
+                    let payload = tunnel_payload(
+                        &WsTunnelMsg::Ping(frame.payload.clone()),
+                        algo,
+                        &key16,
+                        &key32,
+                    )?;
+                    ws_tx.send(Message::Binary(payload)).await?;
+
                 } else if frame.is_pong() {
                     // 浏览器应答我们的保活 Ping，忽略
                 } else if frame.is_close() {
-                    let code = frame.close_code().unwrap_or(1000);
-                    let reason = frame.close_reason().unwrap_or("").to_string();
+                    let close_info = frame.close_info();
                     // 回写 Close 帧应答（RFC 6455 服务器义务），浏览器随后关 TCP
-                    let resp = WsFrame::new_close(Some((code, Some(reason.as_str()))), None);
+                    let resp = WsFrame::new_close(close_info.clone(), None);
                     let mut w = wr_upload.lock().await;
                     w.write_all(&resp.to_bytes()).await?;
                     // 通知 worker 关闭上游
                     let payload = tunnel_payload(
-                        &WsTunnelMsg::Close(Some((code, Some(reason)))),
+                        &WsTunnelMsg::Close(close_info),
                         algo,
                         &key16,
                         &key32,
@@ -187,7 +191,6 @@ where
             }
 
             tokio::select! {
-                // 隧道保活：tungstenite 读侧收到 Ping 自动回 Pong（不暴露给业务层）
                 _ = tokio::time::sleep(TUNNEL_PING_INTERVAL) => {
                     ws_tx.send(Message::Ping(Bytes::new())).await?;
                 }
@@ -240,7 +243,7 @@ where
                             if has_upgraded {
                                 // 如果已经建立了 WS 连接，发送标准的 WS Close 帧通知浏览器
                                 // 1011: Internal Server Error
-                                let close_frame = WsFrame::new_close(Some((1011, Some(err_msg.as_str()))), None);
+                                let close_frame = WsFrame::new_close(Some((1011, Some(err_msg.clone()))), None);
                                 let _ = w.write_all(&close_frame.to_bytes()).await;
                             } else {
                                 // 如果还没升级成功，说明请求直接在 Worker 内失败了。
@@ -278,3 +281,37 @@ where
 
     Ok(())
 }
+
+//
+// 2026-08-23 20:35:26.387
+// GMT+8
+// fetch
+// GET /ws/v3/info
+// 184
+// ms
+// 9.31
+// s
+// free-proxy
+//
+// 调用 ID：ede7d97966af6d2b2b8f9e866639de42
+// 时间戳
+// GMT+8
+// $metadata.message
+// 2026-08-23 20:35:26.387
+// GMT+8
+// internal error; reference = h1e33h6ek1evgtja9hm8r510
+// 2026-08-23 20:35:26.387
+// GMT+8
+// internal error; reference = jbph91pa69uc6v984eoqeich
+// 2026-08-23 20:35:26.387
+// GMT+8
+// internal error; reference = pac481nnd32e1m74v0imk4sq
+// 2026-08-23 20:35:26.387
+// GMT+8
+// internal error; reference = bap6n42l151q6o7p2bmia8ho
+// 2026-08-23 20:35:26.387
+// GMT+8
+// internal error; reference = nlbm7q8191lvovueib06ob5j
+// 2026-08-23 20:35:26.387
+// GMT+8
+// GET http://free-proxy.bcsz8833221.workers.dev/ws/v3/info
