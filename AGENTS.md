@@ -151,6 +151,18 @@ Guidance for AI coding agents working in this repo. User-facing docs, code comme
 │       │   └── tcping.rs
 │       ├── tool.rs
 │       └── ws.rs
+├── lib_test/
+│   ├── .gitignore
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   └── src/
+│       ├── cs.rs
+│       ├── main.rs
+│       ├── test/
+│       │   ├── base.rs
+│       │   ├── http.rs
+│       │   └── mod.rs
+│       └── web.rs
 ├── logs/
 ├── package.json
 ├── README.md
@@ -168,12 +180,13 @@ Guidance for AI coding agents working in this repo. User-facing docs, code comme
 
 ## Build model (non-obvious)
 
-- Four **standalone crates, no root Cargo workspace**: `lib/`, `client_cli/`, `client_tauri/src-tauri/`, `server-rs/` (each has its own `target/`). Cargo commands must be run inside a crate directory — from the repo root they fail with "could not find Cargo.toml". In particular, README's `cargo test -p lib` only works if run from inside `lib/`.
+- Five **standalone crates, no root Cargo workspace**: `lib/`, `client_cli/`, `client_tauri/src-tauri/`, `server-rs/`, `lib_test/` (each has its own `target/`). Cargo commands must be run inside a crate directory — from the repo root they fail with "could not find Cargo.toml". In particular, README's `cargo test -p lib` only works if run from inside `lib/`.
 - `lib` is shared source between native clients and the Cloudflare Worker:
   - default `client` feature pulls in tokio/reqwest/rustls (MITM TLS) — used by both clients;
   - `server-rs` depends on it with `default-features = false` (no tokio), compiled to wasm32 by `worker-build`.
   - After changing `lib`, verify **both** configurations (see commands below) — native-only checks won't catch wasm-side breakage.
 - `server-rs` is a Cloudflare Worker (Rust → wasm32, `worker` crate 0.8 + axum). Real builds/deploy go through wrangler (`worker-build`); plain `cargo check` inside `server-rs/` still works for fast native typechecks.
+- `lib_test` is a **binary E2E harness**, not `#[test]` code — run it with `cargo run`, not `cargo test`. It orchestrates the full chain itself (`src/cs.rs`): spawns the local Worker via `pnpm server-dev` (needs a free port 80 + pnpm on PATH), writes a **random key into `server-rs/.dev.vars`** (overwrites your dev secrets), starts the proxy client (fixed Aes128Gcm + Lz4, port 18081, CA in temp dir) and a local axum target site (port 18082), then drives real requests through the tunnel (`src/test/base.rs`: example.com HTTP/HTTPS + localhost) with a custom colored-report runner (`src/test/mod.rs`, `test_fn!` macro). Requires internet access; not wired into CI.
 
 ## Commands
 
@@ -182,10 +195,12 @@ From repo root (see `package.json`):
 - `npm run server-dev` — local Worker via wrangler; binds **port 80**, reads secrets from `server-rs/.dev.vars` (gitignored: `key`, `domain`)
 - `npm run server-deploy` — deploy Worker to Cloudflare
 - `npm run client-dev` / `npm run client-android-dev` — Tauri desktop / Android dev
+- `npm run test-e2e` — run the `lib_test` E2E harness (same as `cd lib_test && cargo run`; see caveats above)
 
 Per-crate:
 
 - Tests: `cd lib && cargo test` — ~110 tests incl. client↔server contract/roundtrip tests, offline, ~20 s. Two ignored tests (`speed_test::tcping`, `speed_test::health`) need network access / a locally running worker.
+- E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars`** with a random key (restore your own dev secrets afterwards if needed).
 - Wasm-side check of shared lib: `cd lib && cargo check --no-default-features --features server`
 - Security audit (per crate, shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
 - Frontend typecheck+build: `pnpm install && pnpm build` inside `client_tauri/` (tsc + vite). Toolchain: Node 22, pnpm 10 (matches CI).

@@ -10,9 +10,10 @@ use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use lib::algo::{ProxyAead, ProxyCompressor};
 use lib::proxy::{Proxy, ProxyConfig};
+use shell_engine::Shell;
 
 pub struct Server {
-    child: Option<Child>,
+    child: Option<Shell>,
     key: Option<String>,
 }
 
@@ -80,12 +81,21 @@ impl Server {
 
         Self::set_dev_vars(&random_key).await?;
 
-        let child = Command::new("pnpm")
-            .arg("server-dev")
-            .current_dir(Self::project_root()?)
-            .spawn()
-            .context("Failed to spawn pnpm server-dev")?;
+        let mut child = Shell::new("bash")
+            .enable_pty()
+            .work_dir(Self::project_root()?)
+            .disable_snapshot()
+            .line_callback()
+            .on_output(async |line| {
+                if !line.trim().is_empty() && !line.contains("[custom build]") {
+                    println!("{line}");
+                }
 
+            } )
+            .spawn()
+            .await?;
+
+        child.send_line("pnpm server-dev").await?;
         self.child = Some(child);
         self.key = Some(random_key);
 
@@ -102,20 +112,13 @@ impl Server {
 
     pub async fn stop(&mut self) -> anyhow::Result<()> {
         if let Some(mut child) = self.child.take() {
-            child.kill().await?;
+            child.exit().await?;
         }
         self.key = None;
         Ok(())
     }
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-        }
-    }
-}
 
 pub struct Client {
     pub proxy: Proxy,

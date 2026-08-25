@@ -255,9 +255,9 @@ impl Proxy {
                     if let Err(e) = handle_connection(socket, shared).await {
                         if is_benign_disconnect(&e) {
                             #[cfg(debug_assertions)]
-                            eprintln!("proxy: connection {addr}: {e:#} (benign disconnect)");
+                            eprintln!("proxy: connection {addr}: {e} (benign disconnect)");
                         } else {
-                            eprintln!("proxy: connection {addr}: {e:#?}");
+                            eprintln!("proxy: connection {addr}: {:.512?}...", format!("{e:#?}"));
                         }
                     }
                 });
