@@ -49,4 +49,4 @@ jobs:
         run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
 
       - name: Run full E2E suite
-        run: cd lib_test && cargo run
+        run: pnpm run test-e2e

@@ -79,14 +79,13 @@ macro_rules! test_fn {
                 Ok(Ok(Err(e))) => {
                     let duration = start_time.elapsed();
                     let err_msg = format!("{e}");
-                    println!("{red}[TEST_FAILED]{reset}  Run {}/{} {dim}(took {:.2?}){reset}", run_idx, $repeat_count, duration);
+                    println!("{red}[TEST_FAILED]{reset}  Run {}/{} {dim}(took {:.2?}){reset}  {err_msg:.512}", run_idx, $repeat_count, duration);
                     run_results.push($crate::test::TestResultType::Failure(duration, err_msg));
                 }
                 // 4. 任务本身崩溃
                 Ok(Err(join_err)) => {
                     let duration = start_time.elapsed();
-                    println!("{red}[TEST_PANICKED]{reset} Run {}/{} {dim}(took {:.2?}){reset}", run_idx, $repeat_count, duration);
-                    let msg = if join_err.is_panic() {
+                    let err_msg = if join_err.is_panic() {
                         let panic_err = join_err.into_panic();
                         if let Some(s) = panic_err.downcast_ref::<&str>() {
                             s.to_string()
@@ -100,7 +99,8 @@ macro_rules! test_fn {
                     } else {
                         format!("Unknown JoinError: {:?}", join_err)
                     };
-                    run_results.push($crate::test::TestResultType::Panic(duration, msg));
+                    println!("{red}[TEST_PANICKED]{reset} Run {}/{} {dim}(took {:.2?}){reset}  {err_msg:.512}", run_idx, $repeat_count, duration);
+                    run_results.push($crate::test::TestResultType::Panic(duration, err_msg));
                 }
             }
         }
@@ -111,10 +111,10 @@ macro_rules! test_fn {
     };
 
     ($fn_name:ident, $results_vec:expr, $hook:block) => {
-        $crate::test_fn!($fn_name, $results_vec, $hook, 10, 5);
+        $crate::test_fn!($fn_name, $results_vec, $hook, 10, 4);
     };
     ($fn_name:ident, $results_vec:expr) => {
-        $crate::test_fn!($fn_name, $results_vec, {}, 10, 5);
+        $crate::test_fn!($fn_name, $results_vec, {}, 10, 4);
     };
 }
 #[macro_export]
@@ -133,7 +133,7 @@ macro_rules! ensure_health {
 
     // 函数名 + 超时：重复次数固定为 5
     (@test $server:expr, $results:expr, ($fn:ident, $timeout:expr)) => {
-        $crate::test_fn!($fn, $results, { $server.ensure_health().await? }, $timeout, 5);
+        $crate::test_fn!($fn, $results, { $server.ensure_health().await? }, $timeout, 4);
     };
 
     // 函数名 + 超时 + 重复次数

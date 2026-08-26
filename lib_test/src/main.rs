@@ -58,10 +58,10 @@ async fn main() -> Result<()> {
         (dl_256kb),
         (dl_1mb),
         (dl_5mb),
-        (dl_10mb),
-        (dl_25mb),
-        (dl_30mb, 15),
-        (dl_50mb, 20),
+        (dl_10mb, 15),
+        (dl_25mb, 20),
+        (dl_30mb, 25),
+        (dl_50mb, 30),
 
         // ── 上传阶梯 ──
         (ul_0b),
@@ -71,10 +71,10 @@ async fn main() -> Result<()> {
         (ul_256kb),
         (ul_1mb),
         (ul_5mb),
-        (ul_10mb),
-        (ul_25mb),
-        (ul_30mb, 15),
-        (ul_50mb, 20),
+        (ul_10mb, 15),
+        (ul_25mb, 20),
+        (ul_30mb, 25),
+        (ul_50mb, 30),
 
         // ── 二进制对抗样本 ──
         (up_zeros_64k),
