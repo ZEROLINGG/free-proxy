@@ -224,7 +224,6 @@ where
         return Ok(false);
     }
 
-
     // ---------- 首帧：raw 头部 + https 标志（零重建） ----------
     let mut head_frame = BytesMut::with_capacity(header.raw.len() + 1);
     head_frame.extend_from_slice(&header.raw);
@@ -272,12 +271,11 @@ where
         .header("Content-Type", "application/octet-stream")
         .body(reqwest::Body::wrap_stream(body_stream))
         .send();
-    tokio::pin!(resp_fut);
+
+    // 把请求转移到后台任务运行，防止 tx.send().await 在当前 select 中导致协程级死锁
+    let mut resp_task = tokio::spawn(resp_fut);
 
     // ---------- 泵送阶段：读完浏览器请求体即完成（EOS），再等响应 ----------
-    // 响应在请求体未完成前不会到达（edge 契约），因此不再"等响应才发 EOS"。
-    // select 中仍轮询 resp_fut：驱动 body_stream（消费通道，防背压）的同时
-    // 及时上报传输层错误；本地 dev（无 edge）下响应可能提前到达，暂存即可。
     let mut tracker = PumpTracker::new(&extent);
     let mut early_resp: Option<reqwest::Response> = None;
     let mut client_eof = false;
@@ -316,10 +314,11 @@ where
                         RawRead::TimedOut => bail!("browser body idle timeout"),
                     }
                 }
-                res = &mut resp_fut, if early_resp.is_none() => {
+                res = &mut resp_task, if early_resp.is_none() => {
                     match res {
-                        Ok(r) => early_resp = Some(r),
-                        Err(e) => return Err(anyhow::Error::new(e).context("worker request failed")),
+                        Ok(Ok(r)) => early_resp = Some(r),
+                        Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker request failed")),
+                        Err(e) => return Err(anyhow::Error::new(e).context("worker task panicked")),
                     }
                 }
             }
@@ -330,9 +329,11 @@ where
     // ---------- 响应阶段：等待 worker 响应并回传 ----------
     let resp = match early_resp {
         Some(r) => r,
-        None => match timeout(FRAME_IDLE_TIMEOUT, &mut resp_fut).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker request failed")),
+        // 【修改点 3】：这里的 timeout 目标也由原先的 resp_fut 改为 resp_task
+        None => match timeout(FRAME_IDLE_TIMEOUT, &mut resp_task).await {
+            Ok(Ok(Ok(r))) => r,
+            Ok(Ok(Err(e))) => return Err(anyhow::Error::new(e).context("worker request failed")),
+            Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker task panicked")),
             Err(_) => {
                 eprintln!("proxy: worker response idle timeout");
                 write_502(stream).await?;
@@ -476,30 +477,3 @@ pub(super) async fn write_502<S: AsyncWrite + Unpin>(stream: &mut S) -> Result<(
     stream.flush().await?;
     Ok(())
 }
-
-// 当前暂未支持该请求
-
-// curl --url 'https://speedtest12.hkbn.net.prod.hosts.ooklaserver.net:8080/upload?nocache=52469c20-c731-49a4-ac35-002b082605b7&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952' \
-//   -X 'POST' \
-//   -H 'Accept: */*' \
-//   -H 'Accept-Language: zh-HK,zh;q=0.9,en-US;q=0.8,en;q=0.7,ja;q=0.6,zh-CN;q=0.5,zh-TW;q=0.4' \
-//   -H 'Connection: keep-alive' \
-//   -H 'Content-Length: 25000000' \
-//   -H 'Content-type: application/octet-stream' \
-//   -H 'Origin: https://hkbntest.speedtestcustom.com' \
-//   -H 'Referer: https://hkbntest.speedtestcustom.com/' \
-//   -H 'Sec-Fetch-Dest: empty' \
-//   -H 'Sec-Fetch-Mode: cors' \
-//   -H 'Sec-Fetch-Site: cross-site' \
-//   -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36' \
-//   -H 'sec-ch-ua: "Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"' \
-//   -H 'sec-ch-ua-mobile: ?0' \
-//   -H 'sec-ch-ua-platform: "Linux"'
-
-// upload?nocache=52469c20-c731-49a4-ac35-002b082605b7&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.10 秒
-// upload?nocache=62caaa5f-a098-4611-a083-e66b2caeb79f&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.05 秒
-// upload?nocache=088c62d1-cb47-40a4-952f-607f215783e9&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	13.05 秒
-// upload?nocache=6f509292-b2ab-4933-822e-cd4cef0556ac&guid=81c6cad0-9eee-11f1-b4bc-c3d252550952	（已取消）	xhr	speedtest-js-engine.js:17	0.0 kB	12.89
-
-// 有可能触发了cpu限制
-// 有可能有多重kao bei

@@ -2,8 +2,10 @@
 use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::Response;
+use futures_util::future::{select, Either};
 use futures_util::StreamExt;
-use worker::{console_error, Fetch, send::IntoSendFuture};
+use std::pin::pin;
+use worker::{console_error, send::IntoSendFuture, Fetch};
 
 use lib::algo::{decode_chunk, encode_chunk, ProxyAead, ProxyCompressor};
 use lib::http::{parse_head, UrlBuilder};
@@ -73,7 +75,7 @@ pub(crate) async fn proxy_ws(
     Path((version, target)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, (StatusCode, String)> {
-    use worker::{WebsocketEvent, WebSocketPair};
+    use worker::{WebSocketPair, WebsocketEvent};
 
     let is_upgrade = req
         .headers()
@@ -288,7 +290,7 @@ pub(crate) async fn proxy_ws(
             return;
         }
 
-        // ---------- 阶段 4：全双工转发 ----------
+        // ---------- 阶段 4：全双工转发 (Wasm-safe Select) ----------
         let upstream_tx = upstream_ws.clone();
         let server_tx_client = server_tx.clone();
 
@@ -296,7 +298,10 @@ pub(crate) async fn proxy_ws(
             while let Some(event) = event_stream.next().await {
                 let event = match event {
                     Ok(e) => e,
-                    Err(_) => break,
+                    Err(e) => {
+                        console_error!("[proxy_ws] Client event stream error: {}", e);
+                        break;
+                    }
                 };
                 match event {
                     WebsocketEvent::Message(msg) => {
@@ -337,7 +342,10 @@ pub(crate) async fn proxy_ws(
             while let Some(event) = upstream_events.next().await {
                 let event = match event {
                     Ok(e) => e,
-                    Err(_) => break,
+                    Err(e) => {
+                        console_error!("[proxy_ws] Upstream event stream error: {}", e);
+                        break;
+                    }
                 };
                 match event {
                     WebsocketEvent::Message(msg) => {
@@ -355,14 +363,28 @@ pub(crate) async fn proxy_ws(
                         let reason = c.reason();
                         let frame = WsFrame::new_close(Some((code, Some(reason.clone()))), None);
                         ws_send_return(&server_tx_up, &frame.to_bytes(), compressor, aead, &key16, &key32);
-                        let _ = server_tx_up.close(Some(code), Some(reason));
                         break;
                     }
                 }
             }
         };
 
-        futures_util::future::join(client_to_upstream, upstream_to_client).await;
+        // 在栈上 Pin 住两个 Future，以满足 select 的 Unpin 约束 (零内存分配开销)
+        let client_fut = pin!(client_to_upstream);
+        let upstream_fut = pin!(upstream_to_client);
+
+        // 使用纯 future 的 select 等待其中任一结束。
+        // 当发生退出时，未完成的一方会被立刻 Drop 掉，有效防止 Worker 内存泄漏。
+        match select(client_fut, upstream_fut).await {
+            Either::Left((_, _pending_upstream)) => {
+                // 客户端发出了退出信号（或者报错退出），主动切断还在连接的上游 WebSocket
+                let _ = upstream_ws.close(Some(1000), Some("Client disconnected"));
+            }
+            Either::Right((_, _pending_client)) => {
+                // 上游发出了退出信号，主动切断客户端隧道
+                let _ = server_tx.close(Some(1000), Some("Upstream disconnected"));
+            }
+        }
     });
 
     let worker_resp = worker::Response::from_websocket(client).map_err(|e| error!(INTERNAL_SERVER_ERROR, "{}", e))?;

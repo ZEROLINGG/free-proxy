@@ -15,7 +15,7 @@ use axum::Router;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-
+use lib::compress::{Compressor, Gzip};
 use crate::util;
 
 /// 流式下载的单块大小（决定 worker 响应侧的帧数量）
@@ -107,14 +107,12 @@ async fn cookies() -> Response {
     resp
 }
 
-/// 特征化路由：携带 content-encoding: gzip 的"伪 gzip"body。
-/// 目的不是真压缩，而是观察 worker 剥离 content-encoding 后
-/// 浏览器实际收到什么（proxy_http.rs 响应头过滤表）。
+
 async fn gzip() -> Response {
     // gzip magic(1f 8b) + 可辨识明文标记
-    let mut body = vec![0x1f, 0x8b];
-    body.extend_from_slice(b"GZIP-MARKER-PAYLOAD");
-    let mut resp = Body::from(body).into_response();
+    let mut data = vec![0x1f, 0x8b];
+    data.extend_from_slice(b"GZIP-MARKER-PAYLOAD");
+    let mut resp = Body::from(Gzip::compress(data).unwrap()).into_response();
     resp.headers_mut()
         .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     resp
@@ -164,6 +162,7 @@ impl WebServer {
             .route("/redirect-done", get(redirect_done))
             .route("/cookies", get(cookies))
             .route("/gzip", get(gzip))
+            .layer(axum::extract::DefaultBodyLimit::disable())
             .layer(middleware::from_fn(print_request_middleware));
 
         let (tx, rx) = oneshot::channel::<()>();

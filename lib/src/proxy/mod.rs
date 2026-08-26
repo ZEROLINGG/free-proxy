@@ -246,7 +246,7 @@ impl Proxy {
                 let (socket, addr) = match listener.accept().await {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("proxy: accept error: {e}");
+                        eprintln!("[Client:error] accept error: {e}");
                         break;
                     }
                 };
@@ -255,9 +255,9 @@ impl Proxy {
                     if let Err(e) = handle_connection(socket, shared).await {
                         if is_benign_disconnect(&e) {
                             #[cfg(debug_assertions)]
-                            eprintln!("proxy: connection {addr}: {e} (benign disconnect)");
+                            eprintln!("[Client:error] connection {addr}: {e} (benign disconnect)");
                         } else {
-                            eprintln!("proxy: connection {addr}: {:.512?}...", format!("{e:#?}"));
+                            eprintln!("[Client:error] connection {addr}: {:.1024?}...", format!("{e:#?}"));
                         }
                     }
                 });

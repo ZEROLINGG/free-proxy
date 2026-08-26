@@ -1,21 +1,22 @@
 #![allow(unused)]
+use anyhow::{bail, Context};
+use lib::algo::{ProxyAead, ProxyCompressor};
+use lib::proxy::{Proxy, ProxyConfig};
+use lib::tool::{derive_keys, gen_auth_token, DerivedKeys};
+use shell_engine::Shell;
 use std::env;
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use anyhow::{bail, Context};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::fs;
-use tokio::process::{Child, Command};
 use tokio::time::sleep;
-use lib::algo::{ProxyAead, ProxyCompressor};
-use lib::proxy::{Proxy, ProxyConfig};
-use lib::tool::{derive_keys, gen_auth_token};
-use shell_engine::Shell;
 
 pub struct Server {
     child: Option<Shell>,
     key: Option<String>,
+    crash_flag: Option<Arc<AtomicBool>>
 }
 
 impl Server {
@@ -26,6 +27,7 @@ impl Server {
                 Ok(Self {
                     child: None,
                     key: None,
+                    crash_flag: None,
                 })
             }
             Err(e) => bail!("Port 80 is occupied or unavailable: {e}"),
@@ -54,12 +56,15 @@ impl Server {
     fn project_root() -> anyhow::Result<PathBuf> {
         let exe_path = env::current_exe().context("Failed to get current executable path")?;
 
-        let mut current_dir = exe_path.parent().context("Failed to get parent directory of exe")?;
+        let mut current_dir = exe_path
+            .parent()
+            .context("Failed to get parent directory of exe")?;
 
         // 兼容 cargo test 产生的 target/debug/deps/ 路径
-        // 如果当前处在 deps 目录，则多向上回退一层
         if current_dir.ends_with("deps") {
-            current_dir = current_dir.parent().context("Failed to navigate out of deps directory")?;
+            current_dir = current_dir
+                .parent()
+                .context("Failed to navigate out of deps directory")?;
         }
 
         let project_root = current_dir
@@ -82,28 +87,113 @@ impl Server {
 
         Self::set_dev_vars(&random_key).await?;
 
+        // 创建崩溃标志
+        let crash_flag = Arc::new(AtomicBool::new(false));
+        let crash_flag_clone = crash_flag.clone();
+
         let mut child = Shell::new("bash")
             .enable_pty()
             .work_dir(Self::project_root()?)
             .disable_snapshot()
             .line_callback()
-            .on_output(async |line| {
-                if !line.trim().is_empty() && !line.contains("[custom build]") {
-                    println!("{line}");
-                    if line.contains("444 [ERROR]:server-dev 444") {
-                        panic!("wrangler crashed abnormally");
+            .on_output(move |line| {
+                let flag = crash_flag_clone.clone();
+                async move {
+                    if !line.trim().is_empty()
+                        && !line.contains("[custom build]")
+                        && !line.contains(
+                        r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#,
+                    )
+                        && !line.contains("Using secrets defined in .dev.vars")
+                        && !line.contains("╭───────────────────────────╮")
+                        && !(line.contains("│  [b] ") && line.contains("open a browser"))
+                        && !(line.contains("│  [d] ") && line.contains("open devtools"))
+                        && !(line.contains("│  [e] ") && line.contains("open local explorer"))
+                        && !(line.contains("│  [t] ") && line.contains("start tunnel"))
+                        && !(line.contains("│  [c] ") && line.contains("clear console"))
+                        && !(line.contains("│  [x] ") && line.contains("to exit"))
+                        && !line.contains("╰───────────────────────────╯")
+                        && !line.contains("⎔ Starting local server...")
+                        && !line.contains("Local package.json exists, but node_modules missing, did you mean to install?")
+                        && !(line.contains("bash") && line.contains("$"))
+                        && !(line.contains("> @ server-dev ") && line.contains("free-proxy"))
+                        && !line.contains("> cd server-rs && wrangler dev")
+                        && !line.contains("If you think this is a bug then please create an issue at")
+                        && !line.contains("Command failed with exit code 1.")
+                        && !(line.contains("✘") && line.contains("ERROR") && line.contains("[") && line.contains("]") && line.contains(" "))
+                    {
+                        if line.contains("444 [ERROR]:server-dev 444") {
+                            eprintln!("\x1b[1;31m[ERROR]wrangler crashed abnormally!!!\x1b[0m");
+                            // 设置崩溃标志
+                            flag.store(true, Ordering::SeqCst);
+                        } else {
+                            println!("{line}");
+                        }
                     }
                 }
 
-            } )
+            })
             .spawn()
             .await?;
 
-        child.send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#).await?;
+        child
+            .send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
+            .await?;
 
         self.child = Some(child);
         self.key = Some(random_key);
+        self.crash_flag = Some(crash_flag); // 保存标志
         self.wait_until_healthy().await
+    }
+
+    pub async fn ensure_health(&mut self) -> anyhow::Result<()> {
+        let key = self.key.as_deref().context("random key missing")?;
+        let keys = derive_keys(key, "127.0.0.1")?;
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .context("failed to build health probe client")?;
+        if !self.health(&client, &keys).await && !self.health(&client, &keys).await {
+            if let Some(child) = self.child.as_mut() {
+                child.reset().await?;
+                child
+                    .send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
+                    .await?;
+                // 重启后重置崩溃标志
+                if let Some(flag) = &self.crash_flag {
+                    flag.store(false, Ordering::SeqCst);
+                }
+                self.wait_until_healthy().await?;
+            } else {
+                return self.start().await;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn health(&self, client: &reqwest::Client, keys: &DerivedKeys) -> bool {
+        let token = gen_auth_token(&keys.token_base);
+        let ok = match client
+            .get("http://127.0.0.1/health")
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                resp.status().is_success()
+                    && resp
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok()
+            }
+            Err(_) => false,
+        };
+        ok
     }
 
     async fn wait_until_healthy(&self) -> anyhow::Result<()> {
@@ -117,26 +207,15 @@ impl Server {
             .context("failed to build health probe client")?;
 
         let mut consecutive = 0u32;
-        for _ in 0..60 * 45 {
-            let token = gen_auth_token(&keys.token_base);
-            let ok = match client
-                .get("http://127.0.0.1/health")
-                .bearer_auth(token)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    resp.status().is_success()
-                        && resp
-                            .text()
-                            .await
-                            .unwrap_or_default()
-                            .trim()
-                            .parse::<u64>()
-                            .is_ok()
+        for _ in 0..60 * 45 {   // 首次需要构建
+            // 检查崩溃标志，一旦置位立即退出
+            if let Some(flag) = &self.crash_flag {
+                if flag.load(Ordering::SeqCst) {
+                    bail!("Server process exited unexpectedly during startup");
                 }
-                Err(_) => false,
-            };
+            }
+
+            let ok = self.health(&client, &keys).await;
             consecutive = if ok { consecutive + 1 } else { 0 };
             if consecutive >= 3 {
                 return Ok(());
@@ -152,10 +231,10 @@ impl Server {
             child.exit().await?;
         }
         self.key = None;
+        self.crash_flag = None; // 清理崩溃标志
         Ok(())
     }
 }
-
 
 pub struct Client {
     pub proxy: Proxy,
@@ -169,16 +248,18 @@ impl Client {
                 let cfg = ProxyConfig {
                     port: 18081,
                     domain: "127.0.0.1".into(),
-                    use_https: false,  // 本地测试无法启用
+                    use_https: false, // 本地测试无法启用
                     auth_key: key.into(),
                     ca_dir: env::temp_dir().join("free-proxy.test"),
                     ca_key_secret: *b"0o9i8u7y6t5r3w3rj8wuhq6n26^8je(&",
                     compressor: ProxyCompressor::Lz4,
                     aead: ProxyAead::Aes128Gcm,
-                    pref_ip: None,  // 本地测试无法启用
+                    pref_ip: None, // 本地测试无法启用
                 };
 
-                Ok(Self { proxy: Proxy::new(cfg)? })
+                Ok(Self {
+                    proxy: Proxy::new(cfg)?,
+                })
             }
             Err(e) => bail!("Port 18081 is occupied or unavailable: {e}"),
         }
@@ -203,12 +284,13 @@ impl Client {
         self.proxy.ca_cert_path()
     }
     pub async fn check_availability(&self) -> anyhow::Result<(String, u64)> {
-        self.proxy.check_availability().await.map(|r| (r.ip,r.latency_ms))
+        self.proxy
+            .check_availability()
+            .await
+            .map(|r| (r.ip, r.latency_ms))
     }
-
 }
 
-pub const fn proxy_url() -> &'static str { "http://127.0.0.1:18081" }
-
-
-
+pub const fn proxy_url() -> &'static str {
+    "http://127.0.0.1:18081"
+}

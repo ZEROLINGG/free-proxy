@@ -141,8 +141,13 @@ where
 
                 if frame.is_ping() {
                     let pong = WsFrame::new_pong(frame.payload.clone(), None);
-                    let mut w = wr_upload.lock().await;
-                    w.write_all(&pong.to_bytes()).await?;
+
+                    // 将 Mutex 锁的使用限定在最小块级作用域中。
+                    // 锁被丢弃后，才能执行后续的 ws_tx.send().await 操作，彻底切断反压循环死锁。
+                    {
+                        let mut w = wr_upload.lock().await;
+                        w.write_all(&pong.to_bytes()).await?;
+                    }
 
                     let payload = tunnel_payload(
                         &WsTunnelMsg::Ping(frame.payload.clone()),
@@ -156,11 +161,13 @@ where
                     // 浏览器应答我们的保活 Ping，忽略
                 } else if frame.is_close() {
                     let close_info = frame.close_info();
-                    // 回写 Close 帧应答（RFC 6455 服务器义务），浏览器随后关 TCP
                     let resp = WsFrame::new_close(close_info.clone(), None);
-                    let mut w = wr_upload.lock().await;
-                    w.write_all(&resp.to_bytes()).await?;
-                    // 通知 worker 关闭上游
+
+                    {
+                        let mut w = wr_upload.lock().await;
+                        w.write_all(&resp.to_bytes()).await?;
+                    }
+
                     let payload = tunnel_payload(
                         &WsTunnelMsg::Close(close_info),
                         algo,
@@ -230,8 +237,8 @@ where
                         // 101 响应头 / 数据帧 / close 帧：零解析直写
                         WsTunnelMsg::Return(raw) => {
                             has_upgraded = true;
-                            // let head_preview = String::from_utf8_lossy(&raw[..raw.len().min(64)]);
-                            // eprintln!("ws: download Return {} bytes: {head_preview:?}", raw.len());
+                            // 注意：这里的 write_all.await 即使持有锁阻塞也没关系，
+                            // 因为只有当浏览器读取缓冲满时它才会阻塞，这属于正常的反压(Backpressure)，不构成死锁环。
                             let mut w = wr_download.lock().await;
                             w.write_all(&raw).await?;
                         }
@@ -269,49 +276,23 @@ where
                 }
             }
         }
-        eprintln!("ws: download stream ended");
         Ok::<(), anyhow::Error>(())
     };
 
-    let (a, b) = tokio::join!(upload, download);
-
-    // 如果 download 抛出了 Error，意味着收到服务端断开消息，优先返回该 Error
-    b?;
-    a?;
+    // 当任意一端（如断网、被服务端踢出、读取超时）正常退出或报错时，
+    // select! 机制会自动 Drop 另一个未完成的任务，从而关闭底层的 TCP 连接，避免内存泄漏与僵尸进程。
+    tokio::select! {
+        res = upload => {
+            if let Err(e) = res {
+                eprintln!("ws tunnel upload terminated with error: {e:#}");
+            }
+        }
+        res = download => {
+            if let Err(e) = res {
+                eprintln!("ws tunnel download terminated with error: {e:#}");
+            }
+        }
+    }
 
     Ok(())
 }
-
-//
-// 2026-08-23 20:35:26.387
-// GMT+8
-// fetch
-// GET /ws/v3/info
-// 184
-// ms
-// 9.31
-// s
-// free-proxy
-//
-// 调用 ID：ede7d97966af6d2b2b8f9e866639de42
-// 时间戳
-// GMT+8
-// $metadata.message
-// 2026-08-23 20:35:26.387
-// GMT+8
-// internal error; reference = h1e33h6ek1evgtja9hm8r510
-// 2026-08-23 20:35:26.387
-// GMT+8
-// internal error; reference = jbph91pa69uc6v984eoqeich
-// 2026-08-23 20:35:26.387
-// GMT+8
-// internal error; reference = pac481nnd32e1m74v0imk4sq
-// 2026-08-23 20:35:26.387
-// GMT+8
-// internal error; reference = bap6n42l151q6o7p2bmia8ho
-// 2026-08-23 20:35:26.387
-// GMT+8
-// internal error; reference = nlbm7q8191lvovueib06ob5j
-// 2026-08-23 20:35:26.387
-// GMT+8
-// GET http://free-proxy.bcsz8833221.workers.dev/ws/v3/info

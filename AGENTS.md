@@ -2,191 +2,99 @@
 
 Guidance for AI coding agents working in this repo. User-facing docs, code comments, and UI strings are written in Chinese — match that.
 
-## Directory Tree
+## Layout
 
-> `gen/`、`icons/`、`image/`、`logs/`、各 `Cargo.lock` 为构建产物、资源或运行时文件，通常无需修改。
+Five **standalone Rust crates, no root Cargo workspace** — Cargo commands fail from the repo root with "could not find Cargo.toml"; always run them inside a crate dir (each has its own `target/`):
+
+- `lib/` — shared protocol core, compiled by BOTH native clients and the Cloudflare Worker
+- `client_cli/` — CLI client
+- `client_tauri/` — GUI client: React 19 + Vite frontend (`src/`), Tauri 2 backend (`src-tauri/`)
+- `server-rs/` — Cloudflare Worker (Rust → wasm32 via `worker-build`; worker crate 0.8 + axum)
+- `lib_test/` — E2E harness **binary** (`cargo run`, never `cargo test`)
+
+Leave alone: `client_tauri/src-tauri/gen/`, `icons/`, `image/`, `logs/`, `lib_test/src/latest_test.log`, per-crate `Cargo.lock`.
+
+CLI and GUI deliberately share one config/CA directory (`app_data_dir/com.zz.freeproxy`) — the identifier is hardcoded in both `client_cli/src/config.rs` (`IDENTIFIER`) and the Tauri config; changing either desyncs the two clients.
+
+## Directory structure
+
+Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `icons/`, `image/`, `logs/` are omitted):
 
 ```
-./
-├── AGENTS.md
-├── client_cli/
+├── package.json                  # root npm scripts (server-dev/deploy, client-dev, test-e2e)
+├── deny.toml                     # cargo-deny shared config (all 4 crates read it)
+├── .github/workflows/release.yml # tag-triggered release CI (desktop + CLI + Worker zip; Android job commented out)
+├── lib/src/                      # shared protocol core — compiles for native AND wasm32
+│   ├── aead.rs                   #   AEAD ciphers: AES-GCM/GCM-SIV, ChaCha20-Poly1305/XChaCha20
+│   ├── algo.rs                   #   compressor × AEAD negotiation + URL contract /api/{version}/{target}
+│   ├── base.rs                   #   base encodings (base64 / z85 / base91)
+│   ├── compress.rs               #   zstd / gzip / lz4
+│   ├── ecc.rs                    #   ECDSA/ECDH (k256/p256/p384)
+│   ├── frames.rs                 #   binary frame stream: [u32 BE len | payload], zero-length frame = EOS
+│   ├── hash.rs                   #   sha1/sha2/blake3 wrappers
+│   ├── http.rs                   #   httparse header parsing + UrlBuilder (zero-copy)
+│   ├── kdf.rs                    #   PBKDF2 / scrypt / HKDF wrappers
+│   ├── tool.rs                   #   derive_keys (auth_key+domain), time-window token auth, XOR obfuscation
+│   ├── ws.rs                     #   RFC 6455 frames + WsTunnelMsg (shared by client & worker)
+│   ├── proxy/                    #   CLIENT ONLY (feature "client"): local HTTP proxy
+│   │   ├── mod.rs                #     ProxyConfig / Shared / Proxy lifecycle facade
+│   │   ├── connection.rs         #     connection dispatch (plain HTTP vs CONNECT)
+│   │   ├── relay.rs              #     forwarding engine (serve loop, keep-alive via EOS)
+│   │   ├── body.rs               #     request-body boundary parsing
+│   │   ├── client.rs             #     upstream reqwest clients (main/pref-IP/WS HTTP1.1)
+│   │   ├── tls.rs                #     MITM TLS: self-signed CA + per-SNI leaf certs (moka cache)
+│   │   └── ws.rs                 #     WS tunnel client side (RFC6455 parse/mask/reassemble)
+│   └── speed_test/               #   CLIENT ONLY: 优选 IP two-phase speed test
+│       ├── tcping.rs health.rs   #     phase 1 tcping → phase 2 Worker /health check
+│       └── ip.rs                 #     Cloudflare IP candidate ranges
+├── server-rs/
+│   ├── wrangler.toml             # worker config; [dev] port=80; DO NOT touch compatibility_flags
+│   ├── .dev.vars                 # gitignored dev secrets (key/domain); E2E harness rewrites it!
+│   └── src/
+│       ├── app.rs                #   axum router, Bearer auth middleware (±30 s window), routes
+│       ├── proxy_http.rs         #   POST /api/{version}/{target}: streaming decrypt→fetch→re-encrypt
+│       ├── proxy_ws.rs           #   GET /ws/{version}/{target}: upstream WS handshake + full-duplex relay
+│       ├── subscribe.rs          #   GET /subscribe/{port}: Clash / sing-box / base64 subscription
+│       └── lib.rs                #   worker entrypoint
+├── client_cli/src/               # CLI client: main.rs (clap), run.rs (proxy loop), speed.rs,
+│                                 # health.rs, ca.rs (cert install), subscribe.rs,
+│                                 # config.rs (settings.json — shares app_data_dir with GUI)
+├── lib_test/                     # E2E harness binary (`cargo run`, never `cargo test`)
 │   ├── Cargo.lock
 │   ├── Cargo.toml
 │   └── src/
-│       ├── ca.rs
-│       ├── config.rs
-│       ├── health.rs
-│       ├── main.rs
-│       ├── run.rs
-│       ├── speed.rs
-│       └── subscribe.rs
-├── client_tauri/
-│   ├── index.html
-│   ├── package.json
-│   ├── pnpm-lock.yaml
-│   ├── postcss.config.js
-│   ├── public/
-│   ├── README.md
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── assets/
-│   │   ├── components/
-│   │   │   ├── layout/
-│   │   │   │   ├── BottomTabs.tsx
-│   │   │   │   ├── GlassTopbar.tsx
-│   │   │   │   ├── Layout.tsx
-│   │   │   │   └── Sidebar.tsx
-│   │   │   └── ui/
-│   │   │       ├── Badge.tsx
-│   │   │       ├── BottomSheet.tsx
-│   │   │       ├── Button.tsx
-│   │   │       ├── ColoredCta.tsx
-│   │   │       ├── Input.tsx
-│   │   │       ├── Panel.tsx
-│   │   │       ├── Progress.tsx
-│   │   │       ├── Segmented.tsx
-│   │   │       ├── Select.tsx
-│   │   │       ├── Spinner.tsx
-│   │   │       ├── Switch.tsx
-│   │   │       └── Toast.tsx
-│   │   ├── lib/
-│   │   │   ├── tauri.ts
-│   │   │   └── types.ts
-│   │   ├── main.tsx
-│   │   ├── pages/
-│   │   │   ├── About.tsx
-│   │   │   ├── CaCert.tsx
-│   │   │   ├── Dashboard.tsx
-│   │   │   ├── ProxySettings.tsx
-│   │   │   └── SpeedTest.tsx
-│   │   ├── store/
-│   │   │   ├── proxy.ts
-│   │   │   ├── settings.ts
-│   │   │   ├── speedTest.ts
-│   │   │   └── ui.ts
-│   │   ├── styles/
-│   │   │   └── globals.css
-│   │   └── vite-env.d.ts
-│   ├── src-tauri/
-│   │   ├── build.rs
-│   │   ├── capabilities/
-│   │   │   └── default.json
-│   │   ├── Cargo.lock
-│   │   ├── Cargo.toml
-│   │   ├── gen/
-│   │   │   ├── android/
-│   │   │   │   ├── app/
-│   │   │   │   ├── build.gradle.kts
-│   │   │   │   ├── buildSrc/
-│   │   │   │   ├── free-proxy.jks
-│   │   │   │   ├── gradle/
-│   │   │   │   ├── gradle.properties
-│   │   │   │   ├── gradlew*
-│   │   │   │   ├── gradlew.bat
-│   │   │   │   ├── keystore.properties
-│   │   │   │   ├── settings.gradle
-│   │   │   │   └── tauri.settings.gradle
-│   │   │   └── schemas/
-│   │   │       ├── acl-manifests.json
-│   │   │       ├── android-schema.json
-│   │   │       ├── capabilities.json
-│   │   │       ├── desktop-schema.json
-│   │   │       ├── linux-schema.json
-│   │   │       └── mobile-schema.json
-│   │   ├── icons/
-│   │   │   ├── 128x128@2x.png
-│   │   │   ├── 128x128.png
-│   │   │   ├── 32x32.png
-│   │   │   ├── 64x64.png
-│   │   │   ├── android/
-│   │   │   ├── free-proxy-on.svg
-│   │   │   ├── free-proxy.svg
-│   │   │   ├── icon.icns
-│   │   │   ├── icon.ico
-│   │   │   ├── icon.png
-│   │   │   ├── ios/
-│   │   │   ├── Square*.png
-│   │   │   └── StoreLogo.png
-│   │   ├── src/
-│   │   │   ├── commands/
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── proxy.rs
-│   │   │   │   ├── settings.rs
-│   │   │   │   └── speed.rs
-│   │   │   ├── lib.rs
-│   │   │   ├── main.rs
-│   │   │   └── tray.rs
-│   │   └── tauri.conf.json
-│   ├── tsconfig.json
-│   ├── tsconfig.node.json
-│   └── vite.config.ts
-├── deny.toml
-├── image/
-├── lib/
-│   ├── Cargo.lock
-│   ├── Cargo.toml
-│   └── src/
-│       ├── aead.rs
-│       ├── algo.rs
-│       ├── base.rs
-│       ├── compress.rs
-│       ├── ecc.rs
-│       ├── frames.rs
-│       ├── hash.rs
-│       ├── http.rs
-│       ├── kdf.rs
-│       ├── lib.rs
-│       ├── proxy/
-│       │   ├── body.rs
-│       │   ├── client.rs
-│       │   ├── connection.rs
-│       │   ├── mod.rs
-│       │   ├── relay.rs
-│       │   ├── tls.rs
-│       │   └── ws.rs
-│       ├── speed_test/
-│       │   ├── health.rs
-│       │   ├── ip.rs
-│       │   ├── mod.rs
-│       │   └── tcping.rs
-│       ├── tool.rs
-│       └── ws.rs
-├── lib_test/
-│   ├── .gitignore
-│   ├── Cargo.lock
-│   ├── Cargo.toml
-│   └── src/
-│       ├── cs.rs
-│       ├── main.rs
+│       ├── cs.rs                 #   full-chain orchestrator (Worker + proxy + target site)
+│       ├── main.rs               #   harness entrypoint
 │       ├── test/
-│       │   ├── base.rs
-│       │   ├── http.rs
-│       │   └── mod.rs
-│       └── web.rs
-├── logs/
-├── package.json
-├── README.md
-└── server-rs/
-    ├── Cargo.lock
-    ├── Cargo.toml
-    ├── src/
-    │   ├── app.rs
-    │   ├── lib.rs
-    │   ├── proxy_http.rs
-    │   ├── proxy_ws.rs
-    │   └── subscribe.rs
-    └── wrangler.toml
+│       │   ├── base.rs           #     basic reachability cases (example.com http/https)
+│       │   ├── http.rs           #     HTTP proxy test cases
+│       │   └── mod.rs            #     shared proxied client + colored report runner
+│       ├── util.rs               #   helpers
+│       └── web.rs                #   local target site
+└── client_tauri/
+    ├── src/                      # React 19 frontend: pages/ (Dashboard, ProxySettings,
+    │                             # SpeedTest, CaCert, About), components/{layout,ui}/,
+    │                             # store/, lib/, styles/globals.css
+    └── src-tauri/
+        ├── tauri.conf.json       # release version source of truth (CI checks tag against it)
+        ├── capabilities/default.json
+        ├── gen/android/          # generated Android project (+ local keystore files)
+        ├── gen/schemas/          # generated Tauri capability/ACL JSON schemas (regenerated, don't edit)
+        └── src/
+            ├── commands/         # Tauri commands: proxy.rs, speed.rs, settings.rs
+            ├── tray.rs           # system tray
+            └── lib.rs main.rs    # app setup / entrypoint
 ```
 
-## Build model (non-obvious)
+## Build model
 
-- Five **standalone crates, no root Cargo workspace**: `lib/`, `client_cli/`, `client_tauri/src-tauri/`, `server-rs/`, `lib_test/` (each has its own `target/`). Cargo commands must be run inside a crate directory — from the repo root they fail with "could not find Cargo.toml". In particular, README's `cargo test -p lib` only works if run from inside `lib/`.
-- `lib` is shared source between native clients and the Cloudflare Worker:
-  - default `client` feature pulls in tokio/reqwest/rustls (MITM TLS) — used by both clients;
-  - `server-rs` depends on it with `default-features = false` (no tokio), compiled to wasm32 by `worker-build`.
-  - After changing `lib`, verify **both** configurations (see commands below) — native-only checks won't catch wasm-side breakage.
-- `server-rs` is a Cloudflare Worker (Rust → wasm32, `worker` crate 0.8 + axum). Real builds/deploy go through wrangler (`worker-build`); plain `cargo check` inside `server-rs/` still works for fast native typechecks.
-- `lib_test` is a **binary E2E harness**, not `#[test]` code — run it with `cargo run`, not `cargo test`. It orchestrates the full chain itself (`src/cs.rs`): spawns the local Worker via `pnpm server-dev` (needs a free port 80 + pnpm on PATH), writes a **random key into `server-rs/.dev.vars`** (overwrites your dev secrets), starts the proxy client (fixed Aes128Gcm + Lz4, port 18081, CA in temp dir) and a local axum target site (port 18082), then drives real requests through the tunnel (`src/test/base.rs`: example.com HTTP/HTTPS + localhost) with a custom colored-report runner (`src/test/mod.rs`, `test_fn!` macro). Requires internet access; not wired into CI.
+- `lib` compiles in two modes:
+  - default `client` feature → tokio/reqwest/rustls MITM TLS stack, used by both clients;
+  - `server-rs` depends on it with `default-features = false` (no tokio) and compiles to wasm32.
+  - After changing `lib`, check **both** configurations (commands below) — native-only checks won't catch wasm-side breakage.
+- Protocol contract spans `lib::algo` (URL mapping `/api/{version}/{target}`), `lib::frames` (binary framing), `lib::ws`; client↔server roundtrip unit tests lock them together. Read README's 工作原理 / 目录结构 sections before touching these modules.
+- `server-rs`: plain `cargo check` inside its dir works for fast native typechecks; real builds/deploy go through wrangler (`worker-build`).
+- `domain` must never contain a port (enforced in `lib::proxy::Shared::new`): key derivation and token auth use the pure host on both ends — a port silently breaks auth with all-401s.
 
 ## Commands
 
@@ -195,24 +103,23 @@ From repo root (see `package.json`):
 - `npm run server-dev` — local Worker via wrangler; binds **port 80**, reads secrets from `server-rs/.dev.vars` (gitignored: `key`, `domain`)
 - `npm run server-deploy` — deploy Worker to Cloudflare
 - `npm run client-dev` / `npm run client-android-dev` — Tauri desktop / Android dev
-- `npm run test-e2e` — run the `lib_test` E2E harness (same as `cd lib_test && cargo run`; see caveats above)
+- `npm run test-e2e` — run the `lib_test` E2E harness
 
 Per-crate:
 
-- Tests: `cd lib && cargo test` — ~110 tests incl. client↔server contract/roundtrip tests, offline, ~20 s. Two ignored tests (`speed_test::tcping`, `speed_test::health`) need network access / a locally running worker.
-- E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars`** with a random key (restore your own dev secrets afterwards if needed).
+- Unit tests: from inside `lib/`, `cargo test` (~110 offline tests incl. client↔server contract/roundtrip tests, ~20 s). README's `cargo test -p lib` also only works from inside `lib/`. Two ignored tests (`speed_test::tcping`, `speed_test::health`) need network access — note `test_health` hardcodes `127.0.0.1:8787` while `server-dev` binds port 80, so they don't match out of the box.
+- E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars` with a random key** (restore your own dev secrets afterwards if needed).
 - Wasm-side check of shared lib: `cd lib && cargo check --no-default-features --features server`
-- Security audit (per crate, shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
+- Security audit (run per crate; shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
 - Frontend typecheck+build: `pnpm install && pnpm build` inside `client_tauri/` (tsc + vite). Toolchain: Node 22, pnpm 10 (matches CI).
 
 ## Release flow
 
-- Releasing = pushing a `v*` tag; CI (`.github/workflows/release.yml`) builds Tauri desktop, CLI, and Worker zip.
+- Releasing = pushing a `v*` tag; CI (`.github/workflows/release.yml`) builds Tauri desktop (Win/macOS x2/Linux), CLI, and Worker zip.
 - CI hard-fails unless the tag equals `"version"` in `client_tauri/src-tauri/tauri.conf.json` — **that file is the release version source of truth, not Cargo.toml** (crate versions drift from it).
+- The CI Android job is commented out — Android builds happen locally only, even though `gen/android/` exists.
 
 ## Fragile spots
 
-- `server-rs/wrangler.toml` sets `compatibility_flags = ["no_websocket_standard_binary_type"]`. Do not remove or "upgrade" this: worker crate 0.8 requires ArrayBuffer WS messages, and the modern default delivers Blobs, which silently empties WS tunnel frames.
-- Secrets (`key`, `domain`) live in Cloudflare Worker secrets / `.dev.vars`. Never commit `.dev.vars`, `*.pem`, `*.key`, etc. (all gitignored).
-
-Architecture details and request-flow diagrams live in `README.md` (目录结构 / 工作原理 sections) — consult before touching `lib` protocol modules (`frames.rs`, `algo.rs`, `ws.rs`).
+- `server-rs/wrangler.toml` sets `compatibility_flags = ["no_websocket_standard_binary_type"]`. Do not remove or "upgrade" this: worker crate 0.8 requires ArrayBuffer WS messages, and the modern default (compat date ≥ 2026-03-17) delivers Blobs, which silently empties WS tunnel frames. See comment in that file and upstream fix https://github.com/cloudflare/workers-rs/pull/1049 .
+- Secrets (`key`, `domain`) live in Cloudflare Worker secrets / `.dev.vars`. Never commit `.dev.vars*`, `*.pem`, `*.key`, etc. (all gitignored).

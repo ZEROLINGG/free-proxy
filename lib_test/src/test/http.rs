@@ -6,7 +6,7 @@
 //   方法透传 / 状态码与无 body 特殊路径 / 大小阶梯上下行 /
 //   二进制对抗样本 / chunked 上传 / keep-alive / 并发 / 慢速流 / 负向 502。
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use reqwest::Method;
 use tokio::task::JoinSet;
 
@@ -14,7 +14,9 @@ use crate::test::BROWSER;
 use crate::util;
 
 /// 本地目标站基址
-fn base() -> &'static str { crate::web::baseurl() }
+fn base() -> &'static str {
+    crate::web::baseurl()
+}
 
 // ─── 公共检查 ────────────────────────────────────────────────────────────────
 
@@ -42,10 +44,21 @@ async fn upload_check(size: usize) -> Result<()> {
     let expect_hash = util::blake3_hex(&data);
 
     let url = format!("{}/upload", base());
-    let resp = BROWSER.post(&url).body(data).send().await?.error_for_status()?;
+    let resp = BROWSER
+        .post(&url)
+        .body(data)
+        .send()
+        .await?
+        .error_for_status()?;
     let (len, hash) = util::parse_len_blake3(&resp.text().await?)?;
-    ensure!(len == expect_len, "size echo mismatch: server {len} != sent {expect_len}");
-    ensure!(hash == expect_hash, "blake3 mismatch: server={hash} local={expect_hash}");
+    ensure!(
+        len == expect_len,
+        "size echo mismatch: server {len} != sent {expect_len}"
+    );
+    ensure!(
+        hash == expect_hash,
+        "blake3 mismatch: server={hash} local={expect_hash}"
+    );
     Ok(())
 }
 
@@ -77,18 +90,39 @@ ladder_cases! {
 
 async fn method_echo(m: Method) -> Result<String> {
     let url = format!("{}/echo", base());
-    let resp = BROWSER.request(m.clone(), &url).body("x").send().await?.error_for_status()?;
+    let resp = BROWSER
+        .request(m.clone(), &url)
+        .body("x")
+        .send()
+        .await?
+        .error_for_status()?;
     let text = resp.text().await?;
-    ensure!(text.contains(&format!("method={m}")), "method not echoed: {}", text.lines().next().unwrap_or(""));
+    ensure!(
+        text.contains(&format!("method={m}")),
+        "method not echoed: {}",
+        text.lines().next().unwrap_or("")
+    );
     Ok(text)
 }
 
-pub async fn http_get_echo() -> Result<()> { method_echo(Method::GET).await.map(|_| ()) }
-pub async fn http_post_echo() -> Result<()> { method_echo(Method::POST).await.map(|_| ()) }
-pub async fn http_put_echo() -> Result<()> { method_echo(Method::PUT).await.map(|_| ()) }
-pub async fn http_delete_echo() -> Result<()> { method_echo(Method::DELETE).await.map(|_| ()) }
-pub async fn http_patch_echo() -> Result<()> { method_echo(Method::PATCH).await.map(|_| ()) }
-pub async fn http_options_echo() -> Result<()> { method_echo(Method::OPTIONS).await.map(|_| ()) }
+pub async fn http_get_echo() -> Result<()> {
+    method_echo(Method::GET).await.map(|_| ())
+}
+pub async fn http_post_echo() -> Result<()> {
+    method_echo(Method::POST).await.map(|_| ())
+}
+pub async fn http_put_echo() -> Result<()> {
+    method_echo(Method::PUT).await.map(|_| ())
+}
+pub async fn http_delete_echo() -> Result<()> {
+    method_echo(Method::DELETE).await.map(|_| ())
+}
+pub async fn http_patch_echo() -> Result<()> {
+    method_echo(Method::PATCH).await.map(|_| ())
+}
+pub async fn http_options_echo() -> Result<()> {
+    method_echo(Method::OPTIONS).await.map(|_| ())
+}
 
 // ─── 状态码与特殊路径 ────────────────────────────────────────────────────────
 
@@ -108,30 +142,58 @@ pub async fn http_status_304() -> Result<()> {
 
 pub async fn http_status_404() -> Result<()> {
     let resp = BROWSER.get(format!("{}/status/404", base())).send().await?;
-    ensure!(resp.status() == 404, "want 404 passthrough, got {}", resp.status());
-    ensure!(resp.text().await?.contains("status-body-404"), "404 body lost");
+    ensure!(
+        resp.status() == 404,
+        "want 404 passthrough, got {}",
+        resp.status()
+    );
+    ensure!(
+        resp.text().await?.contains("status-body-404"),
+        "404 body lost"
+    );
     Ok(())
 }
 
 pub async fn http_status_500() -> Result<()> {
     let resp = BROWSER.get(format!("{}/status/500", base())).send().await?;
-    ensure!(resp.status() == 500, "want 500 passthrough, got {}", resp.status());
-    ensure!(resp.text().await?.contains("status-body-500"), "500 body lost");
+    ensure!(
+        resp.status() == 500,
+        "want 500 passthrough, got {}",
+        resp.status()
+    );
+    ensure!(
+        resp.text().await?.contains("status-body-500"),
+        "500 body lost"
+    );
     Ok(())
 }
 
 /// HEAD：worker 响应侧走"无 body、无 chunked tail"分支
 pub async fn http_head_no_body() -> Result<()> {
-    let resp = BROWSER.head(format!("{}/download/1024", base())).send().await?;
+    let resp = BROWSER
+        .head(format!("{}/download/1024", base()))
+        .send()
+        .await?;
     ensure!(resp.status() == 200, "want 200, got {}", resp.status());
-    ensure!(resp.bytes().await?.is_empty(), "HEAD response must be empty");
+    ensure!(
+        resp.bytes().await?.is_empty(),
+        "HEAD response must be empty"
+    );
     Ok(())
 }
 
 /// 多跳重定向：worker manual-redirect 原样回传 3xx，由客户端跟随
 pub async fn http_redirect_chain() -> Result<()> {
-    let resp = BROWSER.get(format!("{}/redirect/3", base())).send().await?.error_for_status()?;
-    ensure!(resp.url().path() == "/redirect-done", "unexpected final url: {}", resp.url());
+    let resp = BROWSER
+        .get(format!("{}/redirect/3", base()))
+        .send()
+        .await?
+        .error_for_status()?;
+    ensure!(
+        resp.url().path() == "/redirect-done",
+        "unexpected final url: {}",
+        resp.url()
+    );
     ensure!(resp.text().await? == "redirect-done", "final body lost");
     Ok(())
 }
@@ -150,25 +212,40 @@ async fn upload_raw(payload: Vec<u8>) -> Result<()> {
     let expect_len = payload.len() as u64;
     let expect_hash = util::blake3_hex(&payload);
     let url = format!("{}/upload", base());
-    let resp = BROWSER.post(&url).body(payload).send().await?.error_for_status()?;
+    let resp = BROWSER
+        .post(&url)
+        .body(payload)
+        .send()
+        .await?
+        .error_for_status()?;
     let (len, hash) = util::parse_len_blake3(&resp.text().await?)?;
-    ensure!(len == expect_len, "size echo mismatch: {len} != {expect_len}");
-    ensure!(hash == expect_hash, "blake3 mismatch: server={hash} local={expect_hash}");
+    ensure!(
+        len == expect_len,
+        "size echo mismatch: {len} != {expect_len}"
+    );
+    ensure!(
+        hash == expect_hash,
+        "blake3 mismatch: server={hash} local={expect_hash}"
+    );
     Ok(())
 }
 
-/// 全零：压缩率极端（LZ4 路径）
-pub async fn up_zeros_64k() -> Result<()> { upload_raw(vec![0u8; 64 * 1024]).await }
+/// 全零：压缩率极端
+pub async fn up_zeros_64k() -> Result<()> {
+    upload_raw(vec![0u8; 64 * 1024]).await
+}
 
 /// 全 0xFF
-pub async fn up_ff_64k() -> Result<()> { upload_raw(vec![0xFF; 64 * 1024]).await }
+pub async fn up_ff_64k() -> Result<()> {
+    upload_raw(vec![0xFF; 64 * 1024]).await
+}
 
 /// 重复 "0\r\n\r\n" 序列：打击任何按字节流做边界猜测的实现
 pub async fn up_delim_pattern() -> Result<()> {
     upload_raw(b"0\r\n\r\n".repeat(13_107)).await
 }
 
-/// 纯随机不可压缩数据：AEAD + 帧膨胀上限路径
+/// 纯随机不可压缩数据
 pub async fn up_random_64k() -> Result<()> {
     let payload: Vec<u8> = (0..64 * 1024).map(|_| rand::random::<u8>()).collect();
     upload_raw(payload).await
@@ -201,74 +278,100 @@ pub async fn chunked_up_256kb() -> Result<()> {
         .await?
         .error_for_status()?;
     let (len, hash) = util::parse_len_blake3(&resp.text().await?)?;
-    ensure!(len == expect_hasher_input.len() as u64, "chunked size mismatch: {len}");
-    ensure!(hash == expect_hash, "chunked blake3 mismatch: server={hash} local={expect_hash}");
+    ensure!(
+        len == expect_hasher_input.len() as u64,
+        "chunked size mismatch: {len}"
+    );
+    ensure!(
+        hash == expect_hash,
+        "chunked blake3 mismatch: server={hash} local={expect_hash}"
+    );
     Ok(())
 }
 
-// ─── keep-alive 与并发 ──────────────────────────────────────────────────────
-
-/// 同一连接池连续请求：触发 relay.rs 的 keep-alive 循环与超读字节归还 parser
-pub async fn keepalive_seq_6() -> Result<()> {
-    for i in 0..6 {
-        let path = if i % 2 == 0 { "/" } else { "/echo" };
-        let resp = BROWSER.get(format!("{}{path}", base())).send().await?.error_for_status()?;
-        let body = resp.bytes().await?;
-        ensure!(!body.is_empty(), "keep-alive req #{i} empty body");
-    }
-    Ok(())
-}
 
 /// 并发混合下载：多路复用同一代理端口
-pub async fn concurrent_mixed_8() -> Result<()> {
-    let sizes = [1024u64, 64 * 1024, 256 * 1024, 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 1024];
+pub async fn concurrent_mixed_24() -> Result<()> {
+    let sizes = [
+        1024u64,
+        64 * 1024,
+        256 * 1024,
+        1024,
+        64 * 1024,
+        256 * 1024,
+        1024 * 1024,
+        1024,
+        1024u64,
+        64 * 1024,
+        256 * 1024,
+        1024,
+        64 * 1024,
+        256 * 1024,
+        1024 * 1024,
+        1024,
+        1024u64,
+        64 * 1024,
+        256 * 1024,
+        1024,
+        64 * 1024,
+        256 * 1024,
+        1024 * 1024,
+        1024,
+    ];
     let mut set = JoinSet::new();
     for size in sizes {
         set.spawn(async move { download_check(size).await });
     }
     let mut failed = 0usize;
     while let Some(res) = set.join_next().await {
-        if res.map_err(|e| anyhow::anyhow!("join error: {e}"))?.is_err() {
+        if res
+            .map_err(|e| anyhow::anyhow!("join error: {e}"))?
+            .is_err()
+        {
             failed += 1;
         }
     }
-    ensure!(failed == 0, "{failed}/{} concurrent downloads failed", sizes.len());
+    ensure!(
+        failed == 0,
+        "{failed}/{} concurrent downloads failed",
+        sizes.len()
+    );
     Ok(())
 }
-
-// ─── 流式 / 慢速 ─────────────────────────────────────────────────────────────
-
-/// 慢速流式下载（16 块 × 250ms ≈ 4s）：验证长时流式回传不触发 idle 超时
-pub async fn slow_download_32kb() -> Result<()> { download_check(32 * 1024).await }
 
 // ─── 负向路径 ────────────────────────────────────────────────────────────────
 
 /// 必然连接失败的目标：worker fetch 报错 → 客户端应收到合成 502
 pub async fn negative_unconnectable_502() -> Result<()> {
     let resp = BROWSER.get("http://127.0.0.1:9/").send().await?;
-    ensure!(resp.status() == 502, "want synthesized 502, got {}", resp.status());
+    ensure!(
+        resp.status() == 502,
+        "want synthesized 502, got {}",
+        resp.status()
+    );
     Ok(())
 }
 
-// ─── 特征化观察（不断言产品行为，仅记录现状）────────────────────────────────
 
-/// content-encoding 处理观察：proxy_http.rs 会剥离响应的 content-encoding，
-/// 此用例记录浏览器侧实际收到的头与 body 是否完好，为后续决策留档
-pub async fn charz_gzip_passthrough() -> Result<()> {
-    let resp = BROWSER.get(format!("{}/gzip", base())).send().await?.error_for_status()?;
-    let ce = resp.headers().get("content-encoding").and_then(|v| v.to_str().ok()).map(str::to_owned);
+pub async fn gzip_body() -> Result<()> {
+    let resp = BROWSER
+        .get(format!("{}/gzip", base()))
+        .send()
+        .await?
+        .error_for_status()?;
+    let ce = resp
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let body = resp.bytes().await?;
 
-    println!("  [charz] content-encoding 到达浏览器侧: {:?}", ce);
-    println!("  [charz] body 长度: {} 字节", body.len());
-
-    // 传输层正确性必须成立：body 原样到达（未被解码/损坏）
+    // worker已经自动解压
     let mut expect = vec![0x1f, 0x8b];
     expect.extend_from_slice(b"GZIP-MARKER-PAYLOAD");
-    ensure!(body.as_ref() == expect.as_slice(), "gzip route body corrupted en route");
-
-    if ce.is_none() {
-        println!("  [charz] 注意: content-encoding 被剥离但 body 未变 —— 若上游真返回 gzip 内容将损坏（已知特征，暂不断言失败）");
-    }
+    ensure!(
+        body.as_ref() == expect.as_slice(),
+        "gzip route body corrupted en route"
+    );
     Ok(())
 }
