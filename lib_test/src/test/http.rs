@@ -339,7 +339,6 @@ pub async fn concurrent_mixed_24() -> Result<()> {
     Ok(())
 }
 
-// ─── 负向路径 ────────────────────────────────────────────────────────────────
 
 /// 必然连接失败的目标：worker fetch 报错 → 客户端应收到合成 502
 pub async fn negative_unconnectable_502() -> Result<()> {

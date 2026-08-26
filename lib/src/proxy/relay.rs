@@ -157,24 +157,19 @@ async fn send_to_worker(tx: &tokio::sync::mpsc::Sender<Bytes>, data: &[u8]) -> R
     Ok(())
 }
 
-/// 处理一段属于请求体的字节：转发给 worker 并推进进度。
+/// 处理一段属于请求体的原始字节：把解码后的负载转发给 worker 并推进进度。
 /// 返回 Some(take)：请求体已结束，本段前 take 字节属于 body（其后归 parser）；
-/// None：尚未结束，本段全部属于 body。
+/// None：尚未结束。
+/// chunked 请求下 payload 已由 tracker 解码（分帧字节剥离），只转发纯负载，
+/// 避免 worker 侧对同一分帧再编码造成"双重 chunked"。
 async fn pump_chunk(
     tx: &tokio::sync::mpsc::Sender<Bytes>,
     tracker: &mut PumpTracker,
     data: &[u8],
 ) -> Result<Option<usize>> {
-    match tracker.push(data)? {
-        Some(take) => {
-            send_to_worker(tx, &data[..take]).await?;
-            Ok(Some(take))
-        }
-        None => {
-            send_to_worker(tx, data).await?;
-            Ok(None)
-        }
-    }
+    let pushed = tracker.push(data)?;
+    send_to_worker(tx, &pushed.payload).await?;
+    Ok(pushed.end_at)
 }
 
 // ─── 单请求转发 ──────────────────────────────────────────────────────────────
@@ -183,9 +178,9 @@ async fn pump_chunk(
 /// EOS 完成 worker 请求体，再等待响应并回传。
 /// Cloudflare edge 在请求体未完成前不会交付响应，因此不能"等响应再 EOS"。
 ///   - 上行：头帧（raw + https 标志）→ body 帧（头部超读字节 + 浏览器流）→ EOS；
-///   - 请求体边界：Content-Length 按计数、chunked 按四态扫描（原始字节透传），
-///     无 body 请求立即 EOS；超读字节中不属于 body 的部分归还 parser
-///     （keep-alive 流水线）；浏览器中途 EOF 照发 EOS（截断，worker 侧报错）；
+///   - 请求体边界：Content-Length 按计数、chunked 按四态解码（只转发 chunk 数据
+///     负载，剥离分帧字节），无 body 请求立即 EOS；超读字节中不属于 body 的部分
+///     归还 parser（keep-alive 流水线）；浏览器中途 EOF 照发 EOS（截断，worker 侧报错）；
 ///   - 下行：响应帧流解包写回浏览器。
 ///
 /// 返回是否可复用连接（keep-alive）：relay 成功且客户端未断开即可复用。
