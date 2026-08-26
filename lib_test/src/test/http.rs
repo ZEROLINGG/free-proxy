@@ -1,10 +1,7 @@
 // lib_test/src/test/http.rs
 //
 // 明文 HTTP 代理场景用例矩阵（非 WS）。
-// 每个用例经 BROWSER（reqwest，全量走本地代理）→ 客户端隧道帧化加密
-// → worker 重构请求 → 本地目标站(web.rs)，覆盖：
-//   方法透传 / 状态码与无 body 特殊路径 / 大小阶梯上下行 /
-//   二进制对抗样本 / chunked 上传 / keep-alive / 并发 / 慢速流 / 负向 502。
+
 
 use anyhow::{Result, ensure};
 use reqwest::Method;

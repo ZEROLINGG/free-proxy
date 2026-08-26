@@ -92,7 +92,6 @@ Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `
   - default `client` feature → tokio/reqwest/rustls MITM TLS stack, used by both clients;
   - `server-rs` depends on it with `default-features = false` (no tokio) and compiles to wasm32.
   - After changing `lib`, check **both** configurations (commands below) — native-only checks won't catch wasm-side breakage.
-- Protocol contract spans `lib::algo` (URL mapping `/api/{version}/{target}`), `lib::frames` (binary framing), `lib::ws`; client↔server roundtrip unit tests lock them together. Read README's 工作原理 / 目录结构 sections before touching these modules.
 - `server-rs`: plain `cargo check` inside its dir works for fast native typechecks; real builds/deploy go through wrangler (`worker-build`).
 - `domain` must never contain a port (enforced in `lib::proxy::Shared::new`): key derivation and token auth use the pure host on both ends — a port silently breaks auth with all-401s.
 
@@ -107,11 +106,15 @@ From repo root (see `package.json`):
 
 Per-crate:
 
-- Unit tests: from inside `lib/`, `cargo test` (~110 offline tests incl. client↔server contract/roundtrip tests, ~20 s). README's `cargo test -p lib` also only works from inside `lib/`. Two ignored tests (`speed_test::tcping`, `speed_test::health`) need network access — note `test_health` hardcodes `127.0.0.1:8787` while `server-dev` binds port 80, so they don't match out of the box.
-- E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars` with a random key** (restore your own dev secrets afterwards if needed).
+- Unit tests: from inside `lib/`, `cargo test` (~110 offline tests incl. client↔server contract/roundtrip tests, ~20 s). README's `cargo test -p lib` also only works from inside `lib/`. 
+- E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars` with a random key** (restore your own dev secrets afterwards if needed). Runs all 46 cases; exits non-zero unless every function classifies as 稳定成功/不稳定成功.
 - Wasm-side check of shared lib: `cd lib && cargo check --no-default-features --features server`
 - Security audit (run per crate; shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
 - Frontend typecheck+build: `pnpm install && pnpm build` inside `client_tauri/` (tsc + vite). Toolchain: Node 22, pnpm 10 (matches CI).
+
+## CI
+
+- Pushing to `main` triggers `.github/workflows/test.yml` — the E2E gate runs the full `lib_test` suite and fails the commit if any function isn't StableSuccess/UnstableSuccess.
 
 ## Release flow
 

@@ -123,7 +123,6 @@ mod tests {
 172.64.0.0/13
 131.0.72.0/22";
     #[tokio::test]
-    #[ignore = "requires network access to Cloudflare IPs"]
     async fn test_tcping() -> Result<()> {
         let ips: Vec<&str> = RAW.split_whitespace().collect();
         let total = 1024;

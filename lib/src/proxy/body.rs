@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn trailer_lines_consumed() {
         let data = b"payload".to_vec();
-        let mut encoded = b"7\r\npayload\r\n0\r\nX-Trailer: yes\r\nX-2: no\r\n\r\n".to_vec();
+        let encoded = b"7\r\npayload\r\n0\r\nX-Trailer: yes\r\nX-2: no\r\n\r\n".to_vec();
         let (p, e) = decode_all(&encoded, 5);
         assert_eq!(p, data);
         assert_eq!(e, encoded.len());
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn chunk_extension_size_line() {
         let data = b"abcd".to_vec();
-        let mut encoded = b"4;foo=bar\r\nabcd\r\n0\r\n\r\n".to_vec();
+        let encoded = b"4;foo=bar\r\nabcd\r\n0\r\n\r\n".to_vec();
         let (p, e) = decode_all(&encoded, 4);
         assert_eq!(p, data);
         assert_eq!(e, encoded.len());

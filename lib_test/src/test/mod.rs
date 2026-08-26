@@ -291,8 +291,9 @@ impl FuncReport {
     }
 }
 
-/// 打印优化后的综合测试与稳定性报告
-pub fn print_report(tests: Vec<TestResult>) {
+/// 打印优化后的综合测试与稳定性报告；返回门禁判定：
+/// true = 所有函数均为 稳定成功/不稳定成功（通过）；false = 存在任何失败类别或空结果。
+pub fn print_report(tests: Vec<TestResult>) -> bool {
     let cyan = "\x1b[1;36m";
     let green = "\x1b[1;32m";
     let red = "\x1b[1;31m";
@@ -303,7 +304,7 @@ pub fn print_report(tests: Vec<TestResult>) {
 
     if tests.is_empty() {
         println!("{yellow}No tests were run.{reset}");
-        return;
+        return false;
     }
 
     // 1. 生成每个函数的报告
@@ -436,4 +437,12 @@ pub fn print_report(tests: Vec<TestResult>) {
     } else {
         println!("\n{green}All tests passed consistently! 100% Stability.{reset}\n");
     }
+
+    // 门禁判定：仅 稳定成功 / 不稳定成功 视为通过，其余（含空）一律失败
+    reports.iter().all(|r| {
+        matches!(
+            r.classification,
+            Stability::StableSuccess | Stability::UnstableSuccess
+        )
+    })
 }

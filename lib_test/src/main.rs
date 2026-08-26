@@ -1,4 +1,3 @@
-
 mod cs;
 mod test;
 mod util;
@@ -27,31 +26,14 @@ async fn main() -> Result<()> {
 
     let mut results = Vec::new();
 
-    // 一次性执行所有测试
+    // ── 一次执行全部 46 个 E2E 用例 ──
     ensure_health!(server, results,
-        // 基础链路
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // proxy_example_com_http         Stable Success           100.0%  2.196385826s
-        // proxy_example_com_https        Stable Success           100.0%  173.629723ms
-        // proxy_localhost_hello          Stable Success           100.0%   12.088535ms
+        // ── 基础链路 ──
         (proxy_example_com_http, 15),
         (proxy_example_com_https, 15),
         (proxy_localhost_hello),
 
-
-        // 方法透传
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // http_get_echo                  Stable Success           100.0%   16.830302ms
-        // http_post_echo                 Stable Success           100.0%   12.270628ms
-        // http_put_echo                  Stable Success           100.0%   11.879437ms
-        // http_delete_echo               Stable Success           100.0%   13.389188ms
-        // http_patch_echo                Stable Success           100.0%   13.229072ms
-        // http_options_echo              Stable Success           100.0%   12.626277ms
-        // ----------------------------------------------------------------------
+        // ── 方法透传 ──
         (http_get_echo),
         (http_post_echo),
         (http_put_echo),
@@ -59,19 +41,7 @@ async fn main() -> Result<()> {
         (http_patch_echo),
         (http_options_echo),
 
-
-        // 状态码
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // http_status_204                Stable Success           100.0%   10.291116ms
-        // http_status_304                Stable Success           100.0%   11.449748ms
-        // http_status_404                Stable Success           100.0%   10.234862ms
-        // http_status_500                Stable Success           100.0%   11.426395ms
-        // http_head_no_body              Stable Success           100.0%   10.373933ms
-        // http_redirect_chain            Stable Success           100.0%     60.0069ms
-        // http_multi_cookie              Stable Success           100.0%   12.348704ms
-        // ----------------------------------------------------------------------
+        // ── 状态码与特殊路径 ──
         (http_status_204),
         (http_status_304),
         (http_status_404),
@@ -80,23 +50,7 @@ async fn main() -> Result<()> {
         (http_redirect_chain),
         (http_multi_cookie),
 
-
-
-        // 下载阶梯
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // dl_0b                          Stable Success           100.0%    10.98641ms
-        // dl_1b                          Stable Success           100.0%   10.660793ms
-        // dl_1kb                         Stable Success           100.0%   12.857031ms
-        // dl_64kb                        Stable Success           100.0%   30.532504ms
-        // dl_256kb                       Stable Success           100.0%   68.728044ms
-        // dl_1mb                         Stable Success           100.0%   237.76286ms
-        // dl_5mb                         Stable Success           100.0%  1.157749255s
-        // dl_10mb                        Stable Success           100.0%  2.289150769s
-        // dl_25mb                        Stable Success           100.0%  6.630321611s
-        // dl_30mb                        Stable Success           100.0%  6.997825806s
-        // dl_50mb                        Stable Success           100.0%  11.271576663s
+        // ── 下载阶梯 ──
         (dl_0b),
         (dl_1b),
         (dl_1kb),
@@ -109,21 +63,7 @@ async fn main() -> Result<()> {
         (dl_30mb, 15),
         (dl_50mb, 20),
 
-        // 上传阶梯
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // ul_0b                          Stable Success           100.0%    14.32951ms
-        // ul_1b                          Stable Success           100.0%   12.681413ms
-        // ul_1kb                         Stable Success           100.0%    12.38675ms
-        // ul_64kb                        Stable Success           100.0%   29.084599ms
-        // ul_256kb                       Stable Success           100.0%   71.804509ms
-        // ul_1mb                         Stable Success           100.0%   221.21929ms
-        // ul_5mb                         Stable Success           100.0%  993.138384ms
-        // ul_10mb                        Stable Success           100.0%  1.994511602s
-        // ul_25mb                        Stable Success           100.0%  4.913182856s
-        // ul_30mb                        Stable Success           100.0%  5.969460473s
-        // ul_50mb                        Stable Success           100.0%  9.803689804s
+        // ── 上传阶梯 ──
         (ul_0b),
         (ul_1b),
         (ul_1kb),
@@ -136,41 +76,29 @@ async fn main() -> Result<()> {
         (ul_30mb, 15),
         (ul_50mb, 20),
 
-        // 其他上传
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // up_zeros_64k                   Stable Success           100.0%   13.597323ms
-        // up_ff_64k                      Stable Success           100.0%   12.134797ms
-        // up_delim_pattern               Stable Success           100.0%   12.879354ms
-        // up_random_64k                  Stable Success           100.0%   40.218978ms
+        // ── 二进制对抗样本 ──
         (up_zeros_64k),
         (up_ff_64k),
         (up_delim_pattern),
         (up_random_64k),
 
-        // chunked / 并发
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // chunked_up_256kb               Stable Success           100.0%   74.031586ms
-        // concurrent_mixed_24            Stable Success           100.0%  738.641177ms
-        // ----------------------------------------------------------------------
+        // ── chunked / 并发 ──
         (chunked_up_256kb),
         (concurrent_mixed_24),
 
-
-        // 其他
-        // ---------------------------- Function Details ---------------------------
-        // Function Name                  Classification        Success %  Median Time
-        // -------------------------------------------------------------------------------
-        // negative_unconnectable_502     Stable Success           100.0%    11.86862ms
-        // gzip_body                      Stable Success           100.0%   17.926211ms
+        // ── 负向与gzip ──
         (negative_unconnectable_502),
         (gzip_body),
     );
 
-    print_report(results);
+    let ok = print_report(results);
 
+    server.stop().await?;
+    client.stop().await;
+    web.stop().await?;
+
+    if !ok {
+        std::process::exit(1);
+    }
     Ok(())
 }
