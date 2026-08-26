@@ -202,14 +202,28 @@ where
 {
     let algo = shared.algo();
 
+    // ---------- 请求体范围判定 ----------
+    let extent = body_extent(&header.headers)?;
+
+    println!(
+        "[Client:debug] {:<7} {:<15.30} {:<15.30} {:?}",
+        header.method,
+        header
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("HOST"))
+            .map(|(_, v)| v)
+            .unwrap_or(&"unknown".to_string()),
+        header.path,
+        extent
+    );
+
     // ---------- WebSocket 升级请求：转入 WS 隧道，连接不再复用 ----------
     if header.is_websocket_upgrade() {
         ws::handle_ws_tunnel(stream, header, remaining, is_https, shared).await?;
         return Ok(false);
     }
 
-    // ---------- 请求体范围判定 ----------
-    let extent = body_extent(&header.headers)?;
 
     // ---------- 首帧：raw 头部 + https 标志（零重建） ----------
     let mut head_frame = BytesMut::with_capacity(header.raw.len() + 1);
@@ -376,7 +390,7 @@ where
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("proxy: frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
+                        eprintln!("[Client:debug] frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -387,11 +401,11 @@ where
                 let bytes = match chunk {
                     Some(Ok(b)) => b,
                     Some(Err(e)) => {
-                        eprintln!("proxy: frame read error: {e}");
+                        eprintln!("[Client:debug] frame read error: {e}");
                         return Ok(false);
                     }
                     None => {
-                        eprintln!("proxy: stream ended without EOS (truncated)");
+                        eprintln!("[Client:debug] stream ended without EOS (truncated)");
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -422,7 +436,7 @@ where
                             return Ok(true);
                         }
                         Err(e) => {
-                            eprintln!("proxy: frame protocol error: {e}");
+                            eprintln!("[Client:debug] frame protocol error: {e}");
                             if !wrote {
                                 write_502(stream).await?;
                             }

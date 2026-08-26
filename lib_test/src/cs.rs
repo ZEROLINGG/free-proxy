@@ -4,12 +4,13 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 use anyhow::{bail, Context};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::fs;
-use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use lib::algo::{ProxyAead, ProxyCompressor};
 use lib::proxy::{Proxy, ProxyConfig};
+use lib::tool::{derive_keys, gen_auth_token};
 use shell_engine::Shell;
 
 pub struct Server {
@@ -89,25 +90,61 @@ impl Server {
             .on_output(async |line| {
                 if !line.trim().is_empty() && !line.contains("[custom build]") {
                     println!("{line}");
+                    if line.contains("444 [ERROR]:server-dev 444") {
+                        panic!("wrangler crashed abnormally");
+                    }
                 }
 
             } )
             .spawn()
             .await?;
 
-        child.send_line("pnpm server-dev").await?;
+        child.send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#).await?;
+
         self.child = Some(child);
         self.key = Some(random_key);
+        self.wait_until_healthy().await
+    }
 
+    async fn wait_until_healthy(&self) -> anyhow::Result<()> {
+        let key = self.key.as_deref().context("random key missing")?;
+        let keys = derive_keys(key, "127.0.0.1")?;
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .context("failed to build health probe client")?;
+
+        let mut consecutive = 0u32;
         for _ in 0..60 * 45 {
-            if TcpStream::connect("127.0.0.1:80").await.is_ok() {
-                sleep(Duration::from_secs(5)).await;
+            let token = gen_auth_token(&keys.token_base);
+            let ok = match client
+                .get("http://127.0.0.1/health")
+                .bearer_auth(token)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    resp.status().is_success()
+                        && resp
+                            .text()
+                            .await
+                            .unwrap_or_default()
+                            .trim()
+                            .parse::<u64>()
+                            .is_ok()
+                }
+                Err(_) => false,
+            };
+            consecutive = if ok { consecutive + 1 } else { 0 };
+            if consecutive >= 3 {
                 return Ok(());
             }
             sleep(Duration::from_secs(1)).await;
         }
 
-        bail!("Server launched but failed to bind to port 80 in time");
+        bail!("Server launched but /health never became ready in time");
     }
 
     pub async fn stop(&mut self) -> anyhow::Result<()> {

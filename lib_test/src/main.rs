@@ -24,14 +24,13 @@ async fn main() -> Result<()> {
     let web = WebServer::new();
     web.start().await?;
 
+    sleep(Duration::from_secs(3)).await;
 
-    let _ = dbg!(client.check_availability().await);
-    sleep(Duration::from_secs(5)).await;
     let mut results = Vec::new();
 
     // ── 基础链路 ──
-    test_fn!(proxy_example_com_http, results);
-    test_fn!(proxy_example_com_https, results);
+    test_fn!(proxy_example_com_http, results, 15);
+    test_fn!(proxy_example_com_https, results, 15);
     test_fn!(proxy_localhost_hello, results);
 
     // ── 方法透传 ──

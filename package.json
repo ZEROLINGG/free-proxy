@@ -1,4 +1,7 @@
 {
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "server-dev": "cd server-rs && wrangler dev",
     "server-deploy": "cd server-rs && wrangler deploy",

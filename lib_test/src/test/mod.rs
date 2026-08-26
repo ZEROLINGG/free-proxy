@@ -18,8 +18,6 @@ pub static BROWSER: LazyLock<Client> = LazyLock::new(|| {
 });
 
 
-/// 默认单用例超时
-pub const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub type TestResult = (String, TestResultType); // 函数名，结果
 pub enum TestResultType {
@@ -31,8 +29,8 @@ pub enum TestResultType {
 
 /// 内部实现：带超时的测试执行（超时即 abort 任务并记为 Timeout）
 #[macro_export]
-macro_rules! test_fn_timeout {
-    ($fn_name:ident, $results_vec:expr, $timeout:expr) => {
+macro_rules! test_fn {
+    ($fn_name:ident, $results_vec:expr, $timeout_secs:expr) => {
         let start_time = std::time::Instant::now();
         let test_name = stringify!($fn_name);
 
@@ -52,12 +50,12 @@ macro_rules! test_fn_timeout {
             $fn_name().await
         });
 
-        match ::tokio::time::timeout($timeout, &mut handle).await {
+        match ::tokio::time::timeout(::tokio::time::Duration::from_secs($timeout_secs), &mut handle).await {
             // 超时：abort 悬挂任务，防止断链时等满 96s idle
             Err(_) => {
                 handle.abort();
                 let duration = start_time.elapsed();
-                let err_msg = format!("test timed out after {:?}", $timeout);
+                let err_msg = format!("test timed out after {}s", $timeout_secs);
                 println!("{dim}----------------------------------------------------------------------{reset}");
                 println!("{red}[TIMEOUT]:{reset} {test_name} {dim}(took {duration:.2?}){reset}");
                 println!("{red}┌─ Timeout Details ───────────────────────────────────────────────────{reset}");
@@ -133,17 +131,9 @@ macro_rules! test_fn_timeout {
         }
         println!("{green}======================================================================{reset}");
     };
-}
 
-/// 测试宏：第一个参数是异步函数名，第二个是保存结果的 Vec 变量；
-/// 可选第三个参数为自定义超时时长（std::time::Duration），缺省 90s
-#[macro_export]
-macro_rules! test_fn {
     ($fn_name:ident, $results_vec:expr) => {
-        $crate::test_fn_timeout!($fn_name, $results_vec, $crate::test::DEFAULT_TEST_TIMEOUT);
-    };
-    ($fn_name:ident, $results_vec:expr, $timeout:expr) => {
-        $crate::test_fn_timeout!($fn_name, $results_vec, $timeout);
+        $crate::test_fn!($fn_name, $results_vec, 10);
     };
 }
 

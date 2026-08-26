@@ -6,7 +6,7 @@ use axum::extract::{Path, Request, State};
 use futures_util::stream::{LocalBoxStream, Stream};
 use futures_util::StreamExt;
 use worker::send::IntoSendFuture;
-use worker::Fetch;
+use worker::{Fetch,console_debug};
 
 use lib::algo::{decode_chunk, encode_chunk, ProxyAead, ProxyCompressor};
 use lib::frames::{make_frame, Frame, FrameCache};
@@ -49,6 +49,8 @@ pub(crate) async fn proxy(
     Path((version, target)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, (StatusCode, String)> {
+    console_debug!("[wrangler:debug] [proxy http] start");
+
     let key16 = state.keys.key16;
     let key32 = state.keys.key32;
 
@@ -121,6 +123,7 @@ pub(crate) async fn proxy(
 
     // ---------- 构造并发出上游请求 ----------
     let mut init = worker::RequestInit::new();
+    console_debug!("[wrangler:debug] [proxy http] {:<7} {:<15.30} {:<15.30}", head.method, head.host.unwrap_or("unknown"), head.target, );
 
     let method = match head.method {
         "GET" => worker::Method::Get,

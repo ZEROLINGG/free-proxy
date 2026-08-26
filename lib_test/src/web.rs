@@ -123,12 +123,12 @@ async fn gzip() -> Response {
 async fn print_request_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
-    println!("--> [请求到达] {} {}", method, uri);
+    println!("--> [localhost web] {} {}", method, uri);
     let start = Instant::now();
     let response = next.run(req).await;
     let latency = start.elapsed();
     println!(
-        "<-- [请求完成] {} {} - 状态码: {} (耗时: {:?})",
+        "<-- [localhost web] {} {} - 状态码: {} (耗时: {:?})",
         method,
         uri,
         response.status(),

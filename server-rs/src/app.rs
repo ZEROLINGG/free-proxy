@@ -4,7 +4,7 @@ use axum::response::Response;
 use axum::{extract::Request, extract::State, middleware::Next};
 use axum::{routing::get, routing::post, Router};
 use std::sync::Arc;
-use worker::{Context, Date};
+use worker::{Context, Date, console_error};
 
 use lib::tool::{token_auth, DerivedKeys};
 
@@ -68,12 +68,9 @@ pub(crate) fn status_text(code: u16) -> &'static str {
 
 #[macro_export]
 macro_rules! error {
-    // 匹配: error!(BAD_REQUEST, "静态字符串")
-    ($code:ident, $msg:literal) => {
-        (axum::http::StatusCode::$code, $msg.to_string())
-    };
-    // 匹配: error!(BAD_REQUEST, "格式化 {} {}", a, b)
-    ($code:ident, $($arg:tt)*) => {
-        (axum::http::StatusCode::$code, format!($($arg)*))
-    };
+    ($code:ident, $($arg:tt)*) => {{
+        let err_msg = format!($($arg)*);
+        worker::console_error!("[{}:{}] {}", file!(), line!(), err_msg);
+        (axum::http::StatusCode::$code, err_msg)
+    }};
 }
