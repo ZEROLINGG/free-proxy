@@ -1310,7 +1310,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
- "tracing",
  "url",
  "z85",
  "zstd",

@@ -45,7 +45,7 @@ where
     let client = match client_result {
         Ok(c) => c,
         Err(e) => {
-            tracing::debug!("Failed to build client: {e:#?}");
+            eprintln!("Failed to build client: {e:#?}");
             return false;
         }
     };

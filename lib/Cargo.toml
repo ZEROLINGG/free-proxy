@@ -64,7 +64,7 @@ ipnetwork = { version = "0.21.1", optional = true }
 dirs = { version = "6", optional = true }
 rand = { version = "0.8", optional = true }
 machine-uid = { version = "0.6.0", optional = true }
-tracing = { version = "0.1", optional = true }
+#tracing = { version = "0.1", optional = true }
 
 postcard = { version = "1.1", features = ["alloc"] }
 
@@ -74,7 +74,7 @@ postcard = { version = "1.1", features = ["alloc"] }
 default = ["client"]
 
 # 本地客户端：tokio 运行时 + HTTP 客户端 + MITM TLS
-client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:async-stream", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:moka", "dep:time", "dep:ipnetwork", "dep:reqwest-websocket", "dep:dirs", "dep:rand", "dep:machine-uid", "dep:tracing"]
+client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:async-stream", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:moka", "dep:time", "dep:ipnetwork", "dep:reqwest-websocket", "dep:dirs", "dep:rand", "dep:machine-uid"]
 
 # 服务端 (wasm) 构建：纯逻辑，无 tokio
 server = []

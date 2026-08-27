@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "free-proxy"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1435,7 +1435,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
- "tracing",
  "url",
  "z85",
  "zstd",

@@ -197,8 +197,10 @@ pub(crate) async fn proxy_ws(
             let kl = k.to_ascii_lowercase();
             match kl.as_str() {
                 "host" | "content-length" | "transfer-encoding" | "expect" | "connection"
+                | "keep-alive" | "proxy-connection" | "proxy-authorization" | "te" | "trailer"
                 | "upgrade" | "sec-websocket-key" | "sec-websocket-version"
-                | "sec-websocket-extensions" => {}
+                | "sec-websocket-extensions" | "via" | "forwarded" | "x-forwarded-for"
+                | "x-forwarded-host" | "x-forwarded-proto" | "cf-worker" => {}
                 _ => { let _ = fetch_headers.append(k, *v); }
             }
             if kl == "sec-websocket-key" {

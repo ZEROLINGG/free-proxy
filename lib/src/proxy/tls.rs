@@ -73,7 +73,7 @@ impl TlsManager {
                 Err(e) => {
                     // 解密失败（设备 uid 变化）或文件损坏：自动重建 CA。
                     // CA 证书随之变化，用户需重新导入 ca.crt.pem 到系统信任区。
-                    tracing::warn!("CA key load failed ({e:#}); regenerating CA");
+                    eprintln!("CA key load failed ({e:#}); regenerating CA");
                     remove_ca_files(&cert_path, &key_path, ca_dir);
                     let (cert, key, cert_pem) =
                         generate_and_persist_ca(&cert_path, &key_path, key_secret)?;

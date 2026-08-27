@@ -8,6 +8,8 @@ use futures_util::StreamExt;
 use worker::send::IntoSendFuture;
 use worker::{Fetch,console_debug};
 
+use js_sys::Uint8Array;
+
 use lib::algo::{decode_chunk, encode_chunk, ProxyAead, ProxyCompressor};
 use lib::frames::{make_frame, Frame, FrameCache};
 use lib::http::{parse_head, UrlBuilder};
@@ -121,9 +123,28 @@ pub(crate) async fn proxy(
         }
     }
 
+    // ---------- 定长缓冲判定 ----------
+    // worker::Body::from_stream 恒为 ReadableStream，workerd 按 body 类型强制 chunked，
+    // 手动 content-length 被 Fetch 规范禁用。仅当 content-length 已知且 < 26MiB 时
+    // 改为缓冲 Uint8Array（BufferSource）作 body，上游才能收到定长 content-length。
+    let mut content_length: Option<u64> = None;
+    let mut transfer_encoding_chunked = false;
+    for (k, v) in head.headers.iter() {
+        if k.eq_ignore_ascii_case("content-length") {
+            content_length = v.trim().parse::<u64>().ok();
+        } else if k.eq_ignore_ascii_case("transfer-encoding") {
+            transfer_encoding_chunked |= v
+                .split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("chunked"));
+        }
+    }
+    const BUFFER_THRESHOLD: u64 = 26 * 1024 * 1024; // 26MiB
+    let buffer_mode = !transfer_encoding_chunked
+        && content_length.is_some_and(|cl| cl < BUFFER_THRESHOLD);
+
     // ---------- 构造并发出上游请求 ----------
     let mut init = worker::RequestInit::new();
-    console_debug!("[wrangler:debug] [proxy http] {:<7} {:<15.30} {:<15.30}", head.method, head.host.unwrap_or("unknown"), head.target, );
+    console_debug!("[wrangler:debug] [proxy http] {:<7} {:<15.30} {:<15.30} content_length:{:?} buffer_mode:{buffer_mode}", head.method, head.host.unwrap_or("unknown"), head.target, content_length);
 
     let method = match head.method {
         "GET" => worker::Method::Get,
@@ -142,12 +163,22 @@ pub(crate) async fn proxy(
     // 转发给浏览器，由浏览器按原生语义处理重定向与 cookie。
     init.with_redirect(worker::RequestRedirect::Manual);
 
+    // 过滤 hop-by-hop 与代理专用头（RFC 7230 §6.1 + Proxy-Connection）和 cf特征头：
+    // - content-length/transfer-encoding 统一丢弃，由 workerd 按 body 类型重定长（缓冲=定长，流=chunked）
+    // - expect/connection/keep-alive/upgrade 等为跃点语义，origin 不应看到
+    // - proxy-connection/proxy-authorization 为代理专用伪头，泄露有风险
+    // - via/x-forwarded-* 防伪造，剥离后不重建
     let fetch_headers = worker::Headers::new();
     for (k, v) in head.headers.iter() {
-        // body 长度/编码由 fetch 接管（流式 body 未知长度），Expect 不再转发
-        if ["host", "content-length", "transfer-encoding", "expect"]
-            .iter()
-            .any(|&h| k.eq_ignore_ascii_case(h))
+        if [
+            "host", "content-length", "transfer-encoding", "expect",
+            "connection", "keep-alive", "proxy-connection", "proxy-authorization",
+            "te", "trailer", "upgrade",
+            "via", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
+            "cf-worker"
+        ]
+        .iter()
+        .any(|&h| k.eq_ignore_ascii_case(h))
         {
             continue;
         }
@@ -158,60 +189,111 @@ pub(crate) async fn proxy(
     init.with_headers(fetch_headers);
 
     if method != worker::Method::Get && method != worker::Method::Head {
-        // ---------- 流式 body：解密的帧字节直接喂给上游 fetch（pull 驱动） ----------
-        // 客户端边传我们边解帧边转发，EOS 前上游请求体一直处于"未完成"状态。
-        let upstream_body = async_stream::stream! {
+        if buffer_mode {
+            // ---------- 定长缓冲：完整解包后以 Uint8Array 作 body ----------
+            // workerd 对 BufferSource 自动定长（content-length），上游不再是 chunked。
+            let expect = content_length.unwrap_or(0) as usize;
+            let mut buf: Vec<u8> = Vec::with_capacity(expect);
             for f in initial_frames {
-                match decode_chunk(&f, compressor, aead, &key16, &key32) {
-                    Ok(raw) => yield Ok(raw),
-                    Err(e) => {
-                        yield Err(format!("{e}"));
-                        return;
-                    }
-                }
+                let raw = decode_chunk(&f, compressor, aead, &key16, &key32)
+                    .map_err(|e| error!(BAD_REQUEST, "decode body frame failed: {}", e))?;
+                buf.extend_from_slice(&raw);
             }
             if !saw_eos {
-                loop {
+                'drain: loop {
                     match incoming.next().await {
                         Some(Ok(b)) => {
                             parser.push(&b);
                             loop {
                                 match parser.try_pop() {
                                     Ok(Frame::Frame(f)) => {
-                                        match decode_chunk(&f, compressor, aead, &key16, &key32) {
-                                            Ok(raw) => yield Ok(raw),
-                                            Err(e) => {
-                                                yield Err(format!("{e}"));
-                                                return;
-                                            }
-                                        }
+                                        let raw = decode_chunk(&f, compressor, aead, &key16, &key32)
+                                            .map_err(|e| error!(BAD_REQUEST, "decode body frame failed: {}", e))?;
+                                        buf.extend_from_slice(&raw);
                                     }
-                                    Ok(Frame::Eos) => return, // 请求体正常结束
+                                    Ok(Frame::Eos) => break 'drain, // 请求体正常结束
                                     Ok(Frame::None) => break,
-                                    Err(e) => {
-                                        yield Err(format!("frame error: {e}"));
-                                        return;
-                                    }
+                                    Err(e) => return Err(error!(BAD_REQUEST, "frame error: {}", e)),
                                 }
                             }
                         }
                         Some(Err(_)) => {
-                            yield Err("request body read error".to_string());
-                            return;
+                            return Err(error!(BAD_REQUEST, "request body read error"));
                         }
-                        // EOF 而未收到 EOS = 截断：让上游 fetch 报错，客户端得到 502
+                        // EOF 而未收到 EOS = 截断
                         None => {
-                            yield Err("request body truncated (no EOS)".to_string());
-                            return;
+                            return Err(error!(BAD_GATEWAY, "request body truncated (no EOS)"));
                         }
                     }
                 }
             }
-        };
-        let body = worker::Body::from_stream(upstream_body)
-            .map_err(|e| error!(INTERNAL_SERVER_ERROR, "build upstream body stream failed: {:?}", e))?;
-        if let Some(stream) = body.into_inner() {
-            init.with_body(Some(stream.into()));
+            if buf.len() != expect {
+                return Err(error!(
+                    BAD_GATEWAY,
+                    "body length mismatch: got {}, expected {}",
+                    buf.len(),
+                    expect
+                ));
+            }
+            let arr = Uint8Array::new_with_length(buf.len() as u32);
+            arr.copy_from(&buf);
+            init.with_body(Some(arr.into()));
+        } else {
+            // ---------- 流式 body：解密的帧字节直接喂给上游 fetch（pull 驱动） ----------
+            // 客户端边传我们边解帧边转发，EOS 前上游请求体一直处于"未完成"状态。
+            let upstream_body = async_stream::stream! {
+                for f in initial_frames {
+                    match decode_chunk(&f, compressor, aead, &key16, &key32) {
+                        Ok(raw) => yield Ok(raw),
+                        Err(e) => {
+                            yield Err(format!("{e}"));
+                            return;
+                        }
+                    }
+                }
+                if !saw_eos {
+                    loop {
+                        match incoming.next().await {
+                            Some(Ok(b)) => {
+                                parser.push(&b);
+                                loop {
+                                    match parser.try_pop() {
+                                        Ok(Frame::Frame(f)) => {
+                                            match decode_chunk(&f, compressor, aead, &key16, &key32) {
+                                                Ok(raw) => yield Ok(raw),
+                                                Err(e) => {
+                                                    yield Err(format!("{e}"));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Ok(Frame::Eos) => return, // 请求体正常结束
+                                        Ok(Frame::None) => break,
+                                        Err(e) => {
+                                            yield Err(format!("frame error: {e}"));
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Some(Err(_)) => {
+                                yield Err("request body read error".to_string());
+                                return;
+                            }
+                            // EOF 而未收到 EOS = 截断：让上游 fetch 报错，客户端得到 502
+                            None => {
+                                yield Err("request body truncated (no EOS)".to_string());
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            let body = worker::Body::from_stream(upstream_body)
+                .map_err(|e| error!(INTERNAL_SERVER_ERROR, "build upstream body stream failed: {:?}", e))?;
+            if let Some(stream) = body.into_inner() {
+                init.with_body(Some(stream.into()));
+            }
         }
     }
 
@@ -276,8 +358,7 @@ pub(crate) async fn proxy(
             format!("HTTP/1.1 {} {}\r\n", status, status_text(status)).as_bytes(),
         );
         for (k, v) in resp_headers.iter() {
-            if ["proxy-authenticate","proxy-authorization", "te", "trailer",
-                "transfer-encoding", "upgrade", "content-length", "content-encoding"]
+            if ["content-length", "content-encoding"]
             .iter().any(|&h| k.eq_ignore_ascii_case(h))
             {
                 continue;

@@ -200,18 +200,19 @@ where
     // ---------- 请求体范围判定 ----------
     let extent = body_extent(&header.headers)?;
 
-    tracing::debug!(
-        "[Client:debug] {:<7} {:<15.30} {:<15.30} {:?}",
-        header.method,
-        header
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("HOST"))
-            .map(|(_, v)| v)
-            .unwrap_or(&"unknown".to_string()),
-        header.path,
-        extent
-    );
+    // println!(
+    //     "[Client:debug] {:<7} {:<15.30} {:<15.30} {:?} {:.512?}",
+    //     header.method,
+    //     header
+    //         .headers
+    //         .iter()
+    //         .find(|(k, _)| k.eq_ignore_ascii_case("HOST"))
+    //         .map(|(_, v)| v)
+    //         .unwrap_or(&"unknown".to_string()),
+    //     header.path,
+    //     extent,
+    //     format!("{:?}",header.headers)
+    // );
 
     // ---------- WebSocket 升级请求：转入 WS 隧道，连接不再复用 ----------
     if header.is_websocket_upgrade() {
@@ -330,7 +331,7 @@ where
             Ok(Ok(Err(e))) => return Err(anyhow::Error::new(e).context("worker request failed")),
             Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker task panicked")),
             Err(_) => {
-                tracing::warn!("proxy: worker response idle timeout");
+                eprintln!("proxy: worker response idle timeout");
                 write_502(stream).await?;
                 return Ok(false);
             }
@@ -338,7 +339,7 @@ where
     };
 
     if !resp.status().is_success() {
-        tracing::error!(
+        eprintln!(
             "worker request error: {}, body: {:.1024}...",
             resp.status(),
             resp.text().await.unwrap_or_default()
@@ -386,7 +387,7 @@ where
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(_) => {
-                        tracing::debug!("[Client:debug] frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
+                        eprintln!("[Client:debug] frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -397,11 +398,11 @@ where
                 let bytes = match chunk {
                     Some(Ok(b)) => b,
                     Some(Err(e)) => {
-                        tracing::warn!("[Client:debug] frame read error: {e}");
+                        eprintln!("[Client:debug] frame read error: {e}");
                         return Ok(false);
                     }
                     None => {
-                        tracing::warn!("[Client:debug] stream ended without EOS (truncated)");
+                        eprintln!("[Client:debug] stream ended without EOS (truncated)");
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -432,7 +433,7 @@ where
                             return Ok(true);
                         }
                         Err(e) => {
-                            tracing::warn!("[Client:debug] frame protocol error: {e}");
+                            eprintln!("[Client:debug] frame protocol error: {e}");
                             if !wrote {
                                 write_502(stream).await?;
                             }

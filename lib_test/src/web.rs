@@ -121,7 +121,8 @@ async fn gzip() -> Response {
 async fn print_request_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
-    println!("--> [localhost web] {} {}", method, uri);
+    let headers = req.headers().clone();
+    println!("--> [localhost web] {} {} headers: {:?}", method, uri, headers);
     let start = Instant::now();
     let response = next.run(req).await;
     let latency = start.elapsed();
