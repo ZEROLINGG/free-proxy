@@ -1,100 +1,19 @@
-use std::net::SocketAddr;
-// 会话式 IP 优选测速：
-//   speed_test_start  → 后台任务 + 立即返回 gen(代际号)
-//   speed_test_cancel → 置取消标志 + abort 后台任务
-//   speed_test_state  → 拉模式查询是否在跑
-// 进度/结果全部经事件推送，payload 携带 gen，前端忽略过期代际的事件。
+ // 会话式 IP 优选测速：
+ //   speed_test_start  → 后台任务 + 立即返回 gen(代际号)
+ //   speed_test_cancel → 置取消标志 + abort 后台任务
+ //   speed_test_state  → 拉模式查询是否在跑
+ // 进度/结果全部经事件推送，payload 携带 gen，前端忽略过期代际的事件。
 use super::settings::ProxySettings;
 use super::Result;
 use anyhow::Result as AnyhowResult;
-use lib::speed_test::health::{batch_health, default_matcher};
-use lib::speed_test::ip::IpBuffer;
-use lib::speed_test::tcping::batch_tcping;
-use lib::tool::derive_keys;
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+pub use lib::client::speed::SpeedTestOpts;
+use lib::client::speed::{
+    SESSION_HARD_DEADLINE, reject_domain_port, run_two_phase, worker_health as lib_worker_health,
+};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Runtime};
-
-/// 单次测速会话的整体时长上限，超时自动中止并报错
-const SESSION_HARD_DEADLINE: Duration = Duration::from_secs(120);
-/// 进度事件节流间隔（距上次 emit 不足此间隔时合并到下一次）
-const PROGRESS_THROTTLE: Duration = Duration::from_millis(500);
-/// done 事件返回的结果条数上限（前端按此渲染，避免大列表卡顿）
-const DONE_MAX_ROWS: usize = 50;
-/// 测速与健康检查统一使用的端口（大陆环境 *.workers.dev 走 HTTP/80 绕过 SNI 阻断）
-const TEST_PORT: u16 = 80;
-/// worker_health 的默认探测 IP 池（prefIp 优先，之后按序尝试）
-const DEFAULT_WORKER_IPS: [&str; 24] = [
-    "104.17.23.238",
-    "104.16.154.227",
-    "104.16.124.96",
-    "172.64.0.117",
-    "162.158.0.6",
-    "104.16.244.4",
-    "104.17.23.0",
-    "104.17.164.47",
-    "104.19.35.37",
-    "104.17.211.205",
-    "104.17.60.203",
-    "104.21.91.95",
-    "104.17.217.114",
-    "104.18.42.50",
-    "104.25.253.190",
-    "104.17.210.207",
-    "104.17.171.139",
-    "104.25.246.118",
-    "104.21.83.106",
-    "104.17.30.120",
-    "104.18.45.139",
-    "172.64.229.223",
-    "104.16.251.224",
-    "104.16.148.159",
-];
-
-/// Cloudflare 官方 IPv4 网段（IP 优选采样范围）
-static CF_IP_V4: &str = "
-173.245.48.0/20
-103.21.244.0/22
-103.22.200.0/22
-103.31.4.0/22
-141.101.64.0/18
-108.162.192.0/18
-190.93.240.0/20
-188.114.96.0/20
-197.234.240.0/22
-198.41.128.0/17
-162.158.0.0/15
-104.16.0.0/13
-104.24.0.0/14
-172.64.0.0/13
-131.0.72.0/22";
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", default)]
-pub struct SpeedTestOpts {
-    pub total: u64,
-    pub tcping_limit: usize,
-    pub tcping_timeout_ms: u64,
-    pub health_limit: usize,
-    pub health_timeout_ms: u64,
-}
-
-impl Default for SpeedTestOpts {
-    // 默认值必须与前端 client_tauri/src/store/speedTest.ts 的 opts 初始值保持一致
-    // （跨语言契约，改动两端需同步）
-    fn default() -> Self {
-        Self {
-            total: 8000,
-            tcping_limit: 96,
-            tcping_timeout_ms: 500,
-            health_limit: 32,
-            health_timeout_ms: 2000,
-        }
-    }
-}
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -241,7 +160,7 @@ async fn run_speed_test<R: Runtime>(
             _ = &mut deadline => {
                 cancel.store(true, Ordering::Relaxed);
                 Err(anyhow::anyhow!(
-                    "speed test timed out after {}s",
+                    "测速超过 {} 秒上限,已自动中止",
                     SESSION_HARD_DEADLINE.as_secs()
                 ))
             }
@@ -290,15 +209,12 @@ async fn run_speed_test_inner<R: Runtime>(
     cancel: &AtomicBool,
     gen: u64,
 ) -> AnyhowResult<SpeedOutcome> {
+    // 提前校验 domain 端口（与 lib 保持一致）
+    reject_domain_port(s.domain.trim())?;
+
     let total = opts.total.max(1);
-    let tcping_timeout = Duration::from_millis(opts.tcping_timeout_ms.max(1));
 
-    let domain = s.domain.trim().to_string();
-    reject_domain_port(&domain)?;
-
-    let cidrs: Vec<&str> = CF_IP_V4.split_whitespace().collect();
-    let buf = IpBuffer::new(cidrs, total)?;
-
+    // 阶段1 开始
     let _ = app.emit(
         "speed-test:phase",
         PhasePayload {
@@ -307,237 +223,100 @@ async fn run_speed_test_inner<R: Runtime>(
         },
     );
 
-    let mut last_emit = Instant::now();
-    let (results, aborted) = batch_tcping(
-        buf,
-        opts.tcping_limit.max(1),
-        TEST_PORT,
-        tcping_timeout,
-        |done, rtt| {
+    // 用 lib 的两阶段核心，进度回调中 emit 事件并检查 cancel
+    let mut tcping_done: u64 = 0;
+    let mut tcping_total = total;
+
+    // 阶段2 事件将在回调中切换
+    let mut in_health = false;
+
+    let res = run_two_phase(
+        &s.domain,
+        &s.auth_key,
+        opts,
+        Some(cancel),
+        |done, total_c, rtt| {
             if cancel.load(Ordering::Relaxed) {
                 return false;
             }
-            if done >= total || last_emit.elapsed() >= PROGRESS_THROTTLE {
-                last_emit = Instant::now();
-                let _ = app.emit(
-                    "speed-test:progress",
-                    SpeedProgressPayload {
-                        gen,
-                        phase: Phase::Tcping,
-                        tested: done,
-                        total,
-                        rtt_ms: rtt,
-                    },
-                );
-            }
+            tcping_done = done;
+            tcping_total = total_c;
+            let _ = app.emit(
+                "speed-test:progress",
+                SpeedProgressPayload {
+                    gen,
+                    phase: Phase::Tcping,
+                    tested: done,
+                    total: total_c,
+                    rtt_ms: rtt,
+                },
+            );
             true
         },
-    )
-    .await?;
-
-    if aborted || cancel.load(Ordering::Relaxed) {
-        return Ok(SpeedOutcome::Cancelled);
-    }
-
-    let tested = results.len() as u64;
-    let mut sorted = results;
-    sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-    let candidates: Vec<_> = sorted
-        .iter()
-        .take(opts.health_limit)
-        .map(|(ip, _)| *ip)
-        .collect();
-    let candidate_total = candidates.len() as u64;
-    if candidate_total == 0 {
-        anyhow::bail!("no reachable IPs to health-check");
-    }
-
-    // ── 阶段 2：health（与 tcping 同端口，HTTP 明文绕过 SNI 阻断）──
-    let token = {
-        let keys = derive_keys(&s.auth_key, &domain)?;
-        lib::proxy::gen_auth_token(&keys.token_base)
-    };
-    let _ = app.emit(
-        "speed-test:phase",
-        PhasePayload {
-            gen,
-            phase: Phase::Health,
-        },
-    );
-
-    let mut last_emit = Instant::now();
-    let (healthy, aborted) = batch_health(
-        candidates,
-        opts.health_limit.max(1),
-        &domain,
-        TEST_PORT,
-        Some(token),
-        false,
-        Duration::from_millis(opts.health_timeout_ms.max(1)),
-        default_matcher,
         |done, total_c| {
-            if cancel.load(Ordering::Relaxed) {
-                return false;
-            }
-            if done >= total_c || last_emit.elapsed() >= PROGRESS_THROTTLE {
-                last_emit = Instant::now();
+            if !in_health {
+                in_health = true;
                 let _ = app.emit(
-                    "speed-test:progress",
-                    SpeedProgressPayload {
+                    "speed-test:phase",
+                    PhasePayload {
                         gen,
                         phase: Phase::Health,
-                        tested: done,
-                        total: total_c,
-                        rtt_ms: None,
                     },
                 );
             }
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            let _ = app.emit(
+                "speed-test:progress",
+                SpeedProgressPayload {
+                    gen,
+                    phase: Phase::Health,
+                    tested: done,
+                    total: total_c,
+                    rtt_ms: None,
+                },
+            );
             true
         },
     )
-    .await?;
+    .await;
 
-    if aborted || cancel.load(Ordering::Relaxed) {
-        return Ok(SpeedOutcome::Cancelled);
+    match res {
+        Ok((best_ip, results)) => {
+            // 若 cancel 在完成后被置位，视为取消
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(SpeedOutcome::Cancelled);
+            }
+            let healthy = results.len();
+            let final_results: Vec<IpResult> = results
+                .into_iter()
+                .map(|(ip, rtt)| IpResult { ip, rtt_ms: rtt })
+                .collect();
+            let best = best_ip.clone();
+            Ok(SpeedOutcome::Done(SpeedDonePayload {
+                gen,
+                results: final_results,
+                best_ip: best,
+                tested: tcping_done.max(tcping_total),
+                healthy,
+            }))
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("中止") || cancel.load(Ordering::Relaxed) {
+                Ok(SpeedOutcome::Cancelled)
+            } else {
+                Err(e)
+            }
+        }
     }
-
-    let final_results: Vec<IpResult> = sorted
-        .iter()
-        .filter(|(ip, _)| healthy.iter().any(|h| h.ip() == ip.ip()))
-        .take(DONE_MAX_ROWS)
-        .map(|(ip, rtt)| IpResult {
-            ip: ip.ip().to_string(),
-            rtt_ms: *rtt,
-        })
-        .collect();
-
-    let best_ip = final_results.first().map(|r| r.ip.clone());
-    Ok(SpeedOutcome::Done(SpeedDonePayload {
-        gen,
-        results: final_results,
-        best_ip,
-        tested,
-        healthy: healthy.len(),
-    }))
 }
 
-/// 验证 worker 配置：HTTP/80 + `.resolve()` 绕过 DNS 污染与 SNI 阻断。
-/// 限制最多 6 个并发探测，只要其中任意一个 IP 返回 200，则立即返回 true 并自动取消其余任务。
+/// 验证 worker 配置：复用 lib 的并发池实现
 #[tauri::command]
 pub async fn worker_health(s: ProxySettings) -> Result<bool> {
-    let host = s.domain.trim().to_string();
-    reject_domain_port(&host).map_err(super::err_str)?;
-    let token = {
-        let keys = derive_keys(&s.auth_key, &host).map_err(super::err_str)?;
-        lib::proxy::gen_auth_token(&keys.token_base)
-    };
-
-    let mut ips: Vec<String> = Vec::new();
-    if let Some(ip) = s
-        .pref_ip
-        .as_deref()
-        .map(str::trim)
-        .filter(|ip| !ip.is_empty())
-    {
-        ips.push(ip.to_string());
-    }
-    ips.extend(DEFAULT_WORKER_IPS.iter().map(|s| s.to_string()));
-
-    let mut set = tokio::task::JoinSet::new();
-    let mut ips_iter = ips.into_iter();
-    let max_concurrent = 6;
-
-    // 先启动第一批 (最多 6 个) 并发任务
-    for _ in 0..max_concurrent {
-        if let Some(ip) = ips_iter.next() {
-            let host_c = host.clone();
-            let token_c = token.clone();
-            set.spawn(async move { check_worker_ip(ip, host_c, token_c).await });
-        }
-    }
-
-    // 监听已完成的任务，维护并发池
-    while let Some(res) = set.join_next().await {
-        match res {
-            Ok(true) => {
-                set.abort_all();
-                return Ok(true);
-            }
-            _ => {
-                // 探测失败 (Ok(false)) 或是 task panick (Err)。如果有剩余 IP，补充进池子保持 6 个并发。
-                if let Some(ip) = ips_iter.next() {
-                    let host_c = host.clone();
-                    let token_c = token.clone();
-                    set.spawn(async move { check_worker_ip(ip, host_c, token_c).await });
-                }
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-/// 抽离出的单 IP 检查逻辑 (提供给 JoinSet 进行并发执行)
-async fn check_worker_ip(ip: String, host: String, token: String) -> bool {
-    let addr: SocketAddr = match format!("{ip}:{TEST_PORT}").parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-
-    let client = match Client::builder()
-        .resolve(&host, addr)
-        .timeout(Duration::from_secs(3))
-        .no_proxy()
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("worker_health: failed to build client for {ip}: {e}");
-            return false;
-        }
-    };
-
-    let url = match lib::http::UrlBuilder::new()
-        .https(false)
-        .host(host.as_str())
-        .port(TEST_PORT)
-        .path("/health")
-        .build()
-    {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-
-    let resp = match client.get(url).bearer_auth(&token).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("worker_health: {ip} failed: {e}");
-            return false;
-        }
-    };
-
-    let status = resp.status();
-    match resp.bytes().await {
-        Ok(body) if default_matcher(status, &body) => true,
-        Ok(_) => {
-            eprintln!("worker_health: {ip} matcher failed (status {status})");
-            false
-        }
-        Err(e) => {
-            eprintln!("worker_health: {ip} read body failed: {e}");
-            false
-        }
-    }
-}
-
-
-/// domain 不允许携带端口：worker 侧密钥派生基于纯 host，带端口会导致
-/// token 不匹配（全链路 401）。与 Proxy::new 的校验保持一致。
-fn reject_domain_port(domain: &str) -> AnyhowResult<()> {
-    let (_host, port) = lib::http::split_host_port(domain)?;
-    if port.is_some() {
-        anyhow::bail!("domain must not contain a port, got {domain:?}");
-    }
-    Ok(())
+    lib_worker_health(&s.domain, &s.auth_key, s.pref_ip.as_deref())
+        .await
+        .map_err(super::err_str)
 }

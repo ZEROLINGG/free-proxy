@@ -114,7 +114,7 @@ export const DEFAULT_SETTINGS: ProxySettings = {
   domain: "",
   useHttps: false,
   authKey: "",
-  localPort: 8081,
+  localPort: 8001,
   compressor: "zstd",
   aead: "aes128gcm",
   prefIp: null,
@@ -188,4 +188,11 @@ export function isAead(v: string): v is Aead {
 
 export function isCompressor(v: string): v is Compressor {
   return COMPRESSORS.some((c) => c.value === v);
+}
+
+export function subscribeUrl(domain: string, useHttps: boolean, port: number): string {
+  const d = domain.trim();
+  if (!d) throw new Error("domain 不能为空");
+  const scheme = useHttps ? "https" : "http";
+  return `${scheme}://${d}/subscribe/${port}`;
 }

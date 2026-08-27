@@ -68,10 +68,10 @@ impl Shared {
     pub(crate) fn new(cfg: &ProxyConfig) -> Result<Self> {
         // domain 不允许携带端口：worker 侧密钥派生与 token 校验均基于纯 host（env secret
         // "domain"），带端口会导致两端 token 不匹配（全链路 401）。
-        let (_host, port) = split_host_port(&cfg.domain).context("invalid domain")?;
+        let (_host, port) = split_host_port(&cfg.domain).context("domain 格式无效")?;
         ensure!(
             port.is_none(),
-            "domain must not contain a port, got {:?}",
+            "domain不能携带端口, got {:?}",
             cfg.domain
         );
 
@@ -246,7 +246,7 @@ impl Proxy {
                 let (socket, addr) = match listener.accept().await {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[Client:error] accept error: {e}");
+                        tracing::error!("[Client:error] accept error: {e}");
                         break;
                     }
                 };
@@ -255,9 +255,9 @@ impl Proxy {
                     if let Err(e) = handle_connection(socket, shared).await {
                         if is_benign_disconnect(&e) {
                             #[cfg(debug_assertions)]
-                            eprintln!("[Client:error] connection {addr}: {e} (benign disconnect)");
+                            tracing::debug!("[Client:error] connection {addr}: {e} (benign disconnect)");
                         } else {
-                            eprintln!("[Client:error] connection {addr}: {:.1024?}...", format!("{e:#?}"));
+                            tracing::error!("[Client:error] connection {addr}: {:.1024?}...", format!("{e:#?}"));
                         }
                     }
                 });

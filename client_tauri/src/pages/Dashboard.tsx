@@ -7,6 +7,7 @@ import {
   FIELD_LABELS,
   isAead,
   isCompressor,
+  subscribeUrl,
   validateSettings,
   type Aead,
   type Compressor,
@@ -42,7 +43,17 @@ export function Dashboard() {
   const [hotBusy, setHotBusy] = useState(false);
   const [copying, setCopying] = useState(false);
 
-  const subscriptionUrl = `${settings.useHttps ? "https" : "http"}://${settings.domain.trim()}/subscribe/${status.running ? status.port : settings.localPort}`;
+  const subscriptionUrl = (() => {
+    try {
+      return subscribeUrl(
+        settings.domain,
+        settings.useHttps,
+        status.running ? status.port : settings.localPort,
+      );
+    } catch {
+      return "";
+    }
+  })();
 
   const copySubscription = async () => {
     if (!settings.domain.trim()) {

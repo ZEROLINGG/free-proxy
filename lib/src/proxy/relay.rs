@@ -200,7 +200,7 @@ where
     // ---------- 请求体范围判定 ----------
     let extent = body_extent(&header.headers)?;
 
-    println!(
+    tracing::debug!(
         "[Client:debug] {:<7} {:<15.30} {:<15.30} {:?}",
         header.method,
         header
@@ -330,7 +330,7 @@ where
             Ok(Ok(Err(e))) => return Err(anyhow::Error::new(e).context("worker request failed")),
             Ok(Err(e)) => return Err(anyhow::Error::new(e).context("worker task panicked")),
             Err(_) => {
-                eprintln!("proxy: worker response idle timeout");
+                tracing::warn!("proxy: worker response idle timeout");
                 write_502(stream).await?;
                 return Ok(false);
             }
@@ -338,7 +338,7 @@ where
     };
 
     if !resp.status().is_success() {
-        eprintln!(
+        tracing::error!(
             "worker request error: {}, body: {:.1024}...",
             resp.status(),
             resp.text().await.unwrap_or_default()
@@ -386,7 +386,7 @@ where
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(_) => {
-                        eprintln!("[Client:debug] frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
+                        tracing::debug!("[Client:debug] frame idle timeout (no data for {:?})", FRAME_IDLE_TIMEOUT);
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -397,11 +397,11 @@ where
                 let bytes = match chunk {
                     Some(Ok(b)) => b,
                     Some(Err(e)) => {
-                        eprintln!("[Client:debug] frame read error: {e}");
+                        tracing::warn!("[Client:debug] frame read error: {e}");
                         return Ok(false);
                     }
                     None => {
-                        eprintln!("[Client:debug] stream ended without EOS (truncated)");
+                        tracing::warn!("[Client:debug] stream ended without EOS (truncated)");
                         if !wrote {
                             write_502(stream).await?;
                         }
@@ -432,7 +432,7 @@ where
                             return Ok(true);
                         }
                         Err(e) => {
-                            eprintln!("[Client:debug] frame protocol error: {e}");
+                            tracing::warn!("[Client:debug] frame protocol error: {e}");
                             if !wrote {
                                 write_502(stream).await?;
                             }

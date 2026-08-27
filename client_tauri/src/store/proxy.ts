@@ -31,7 +31,7 @@ export const useProxy = create<ProxyState>((set) => ({
     running: false,
     port: 0,
     ip: null,
-    compressor: "lz4",
+    compressor: "zstd",
     aead: "aes128gcm",
   },
   busy: false,

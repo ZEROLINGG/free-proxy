@@ -258,6 +258,7 @@ fn main() -> Result<()> {
                     Some(field) => {
                         *field = v.clone();
                         let updated: config::ProxySettings = serde_json::from_value(json)?;
+                        updated.validate()?;
                         if key == "authKey" {
                             println!("提示:认证密钥已明文写入配置文件,请确保文件权限安全。");
                         }

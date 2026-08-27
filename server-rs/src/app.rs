@@ -4,7 +4,7 @@ use axum::response::Response;
 use axum::{extract::Request, extract::State, middleware::Next};
 use axum::{routing::get, routing::post, Router};
 use std::sync::Arc;
-use worker::{Context, Date, console_error};
+use worker::{Context, Date};
 
 use lib::tool::{token_auth, DerivedKeys};
 

@@ -6,6 +6,13 @@ mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // tracing: 默认 WARN，RUST_LOG=debug 可开启
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     #[allow(unused)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
