@@ -5,7 +5,7 @@ use axum::response::Response;
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use std::pin::pin;
-use worker::{console_error, send::IntoSendFuture, Fetch};
+use worker::{send::IntoSendFuture, Fetch};
 
 use lib::algo::{decode_chunk, encode_chunk, ProxyAead, ProxyCompressor};
 use lib::http::{parse_head, UrlBuilder};
@@ -109,7 +109,7 @@ pub(crate) async fn proxy_ws(
         let mut event_stream = match server.events() {
             Ok(e) => e,
             Err(e) => {
-                console_error!("[proxy_ws] register event stream failed: {e}");
+                lib::error!("register event stream failed: {e}");
                 return;
             }
         };
@@ -129,7 +129,7 @@ pub(crate) async fn proxy_ws(
                     ws_send_error(&server_tx, "Client sent non-binary message (text)", compressor, aead, &key16, &key32);
                 }
                 Some(Ok(WebsocketEvent::Close(_))) => {
-                    console_error!("[proxy_ws] closed before head frame");
+                    lib::error!("closed before head frame");
                     return;
                 }
                 Some(Err(e)) => {
@@ -138,7 +138,7 @@ pub(crate) async fn proxy_ws(
                     return;
                 }
                 None => {
-                    console_error!("[proxy_ws] event stream ended before head frame");
+                    lib::error!("event stream ended before head frame");
                     return;
                 }
             }
@@ -301,7 +301,7 @@ pub(crate) async fn proxy_ws(
                 let event = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        console_error!("[proxy_ws] Client event stream error: {}", e);
+                        lib::error!("Client event stream error: {}", e);
                         break;
                     }
                 };
@@ -345,7 +345,7 @@ pub(crate) async fn proxy_ws(
                 let event = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        console_error!("[proxy_ws] Upstream event stream error: {}", e);
+                        lib::error!("Upstream event stream error: {}", e);
                         break;
                     }
                 };

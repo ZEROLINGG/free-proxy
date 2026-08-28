@@ -6,8 +6,8 @@
 use anyhow::{Context, Result, anyhow};
 use moka::sync::Cache;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer,
+    KeyPair, KeyUsagePurpose,
 };
 use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
@@ -25,7 +25,6 @@ use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::server::TlsStream;
 
 use crate::aead::{Aes256GcmSiv, Cipher};
-
 
 /// 叶子证书缓存容量上限（moka 精确维护，非软上限）
 const LEAF_CACHE_MAX: u64 = 256;
@@ -51,8 +50,7 @@ pub struct TlsManager {
 }
 
 struct Ca {
-    cert: Certificate,
-    key: KeyPair,
+    issuer: Issuer<'static, KeyPair>,
     cert_pem: String,
 }
 
@@ -64,35 +62,26 @@ impl TlsManager {
         let cert_path = ca_dir.join("ca.crt.pem");
         let key_path = ca_dir.join("ca.key.enc");
 
-        let (cert, key, cert_pem, rebuilt) = if cert_path.exists() && key_path.exists() {
+        let (ca, rebuilt) = if cert_path.exists() && key_path.exists() {
             match load_ca(&cert_path, &key_path, key_secret) {
-                Ok((cert, key)) => {
-                    let cert_pem = cert.pem();
-                    (cert, key, cert_pem, false)
-                }
+                Ok(ca) => (ca, false),
                 Err(e) => {
                     // 解密失败（设备 uid 变化）或文件损坏：自动重建 CA。
                     // CA 证书随之变化，用户需重新导入 ca.crt.pem 到系统信任区。
-                    eprintln!("CA key load failed ({e:#}); regenerating CA");
+                    crate::warn!("CA key load failed ({e:#}); regenerating CA");
                     remove_ca_files(&cert_path, &key_path, ca_dir);
-                    let (cert, key, cert_pem) =
-                        generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
-                    (cert, key, cert_pem, true)
+                    let ca = generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
+                    (ca, true)
                 }
             }
         } else {
             // 首次运行 / 旧版明文格式迁移（只有 ca.crt.pem + ca.key.pem）：清理残留后重建
             remove_ca_files(&cert_path, &key_path, ca_dir);
-            let (cert, key, cert_pem) =
-                generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
-            (cert, key, cert_pem, false)
+            let ca = generate_and_persist_ca(&cert_path, &key_path, key_secret)?;
+            (ca, false)
         };
 
-        let ca = Arc::new(Ca {
-            cert,
-            key,
-            cert_pem,
-        });
+        let ca = Arc::new(ca);
         let leaf_cache = Arc::new(LeafCache::new());
         let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -128,9 +117,9 @@ impl TlsManager {
             HANDSHAKE_TIMEOUT,
             LazyConfigAcceptor::new(Acceptor::default(), socket),
         )
-            .await
-            .map_err(|_| anyhow!("timed out waiting for ClientHello"))?
-            .map_err(|e| anyhow!("TLS pre-handshake (read ClientHello) failed: {e}"))?;
+        .await
+        .map_err(|_| anyhow!("timed out waiting for ClientHello"))?
+        .map_err(|e| anyhow!("TLS pre-handshake (read ClientHello) failed: {e}"))?;
 
         let sni = handshake.client_hello().server_name().map(str::to_string);
 
@@ -158,12 +147,11 @@ impl TlsManager {
             HANDSHAKE_TIMEOUT,
             handshake.into_stream(Arc::new(server_config)),
         )
-            .await
-            .map_err(|_| anyhow!("TLS handshake timed out for host {host:?}"))?
-            .map_err(|e| anyhow!("TLS handshake failed for host {host:?}: {e}"))
+        .await
+        .map_err(|_| anyhow!("TLS handshake timed out for host {host:?}"))?
+        .map_err(|e| anyhow!("TLS handshake failed for host {host:?}: {e}"))
     }
 }
-
 
 fn normalize_host(raw: &str) -> String {
     let raw = raw.trim();
@@ -206,7 +194,7 @@ fn write_key_file(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn generate_ca() -> Result<(Certificate, KeyPair)> {
+fn generate_ca() -> Result<(Certificate, Issuer<'static, KeyPair>)> {
     let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
@@ -224,7 +212,8 @@ fn generate_ca() -> Result<(Certificate, KeyPair)> {
     params.not_after = now + CertDuration::days(365 * CA_VALIDITY_YEARS);
 
     let cert = params.self_signed(&key)?;
-    Ok((cert, key))
+    let issuer = Issuer::new(params, key);
+    Ok((cert, issuer))
 }
 
 /// 生成 CA 并持久化（证书明文 + 密钥加密），供首次创建与自动重建共用。
@@ -232,17 +221,20 @@ fn generate_and_persist_ca(
     cert_path: &Path,
     key_path: &Path,
     key_secret: &[u8; 32],
-) -> Result<(Certificate, KeyPair, String)> {
-    let (cert, key) = generate_ca()?;
+) -> Result<Ca> {
+    let (cert, issuer) = generate_ca()?;
     let cert_pem = cert.pem();
     std::fs::write(cert_path, &cert_pem)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
 
-    let encrypted_key = Aes256GcmSiv::encrypt(key.serialize_pem().as_bytes(), key_secret)
-        .context("failed to encrypt CA key")?;
+    let encrypted_key = Aes256GcmSiv::encrypt(
+        issuer.key().serialize_pem().as_bytes(),
+        key_secret,
+    )
+    .context("failed to encrypt CA key")?;
     write_key_file(key_path, &encrypted_key)
         .with_context(|| format!("failed to write {}", key_path.display()))?;
-    Ok((cert, key, cert_pem))
+    Ok(Ca { issuer, cert_pem })
 }
 
 /// 删除 CA 相关文件（含旧版明文 ca.key.pem 残留），供重建前清理。
@@ -253,7 +245,7 @@ fn remove_ca_files(cert_path: &Path, key_path: &Path, ca_dir: &Path) {
     }
 }
 
-fn load_ca(cert_path: &Path, key_path: &Path, secret: &[u8; 32]) -> Result<(Certificate, KeyPair)> {
+fn load_ca(cert_path: &Path, key_path: &Path, secret: &[u8; 32]) -> Result<Ca> {
     let cert_pem = std::fs::read_to_string(cert_path)
         .with_context(|| format!("failed to read {}", cert_path.display()))?;
 
@@ -266,15 +258,11 @@ fn load_ca(cert_path: &Path, key_path: &Path, secret: &[u8; 32]) -> Result<(Cert
         .context("CA key is not valid UTF-8 after decryption")?;
 
     let key = KeyPair::from_pem(&key_pem).map_err(|e| anyhow!("failed to parse CA key: {e}"))?;
-    let params = CertificateParams::from_ca_cert_pem(&cert_pem)
+    let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
         .map_err(|e| anyhow!("failed to parse CA cert: {e}"))?;
-    let cert = params
-        .self_signed(&key)
-        .map_err(|e| anyhow!("failed to rebuild CA cert object: {e}"))?;
 
-    Ok((cert, key))
+    Ok(Ca { issuer, cert_pem })
 }
-
 
 struct LeafCache {
     inner: Cache<String, Arc<CertifiedKey>>,
@@ -322,7 +310,6 @@ impl ResolvesServerCert for FixedCertResolver {
     }
 }
 
-
 fn make_leaf(host: &str, ca: &Ca) -> Result<CertifiedKey> {
     // CertificateParams::new 自动识别 IP / 域名 SAN
     let mut params = CertificateParams::new(vec![host.to_string()])
@@ -340,7 +327,7 @@ fn make_leaf(host: &str, ca: &Ca) -> Result<CertifiedKey> {
     params.not_after = now + CertDuration::days(LEAF_VALIDITY_DAYS);
 
     let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-    let leaf = params.signed_by(&leaf_key, &ca.cert, &ca.key)?;
+    let leaf = params.signed_by(&leaf_key, &ca.issuer)?;
 
     let cert_der = leaf.der().clone();
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
@@ -355,12 +342,25 @@ fn make_leaf(host: &str, ca: &Ca) -> Result<CertifiedKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::PublicKeyData;
     use std::str::FromStr;
 
     fn tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fp-tls-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    // 辅助：通过 x509-parser 解析 PEM 的 subject DN 用于跨重启一致性校验
+    fn parse_subject_dn(pem_str: &str) -> String {
+        use rustls::pki_types::pem::PemObject;
+        use x509_parser::prelude::*;
+        let der = rustls::pki_types::CertificateDer::from_pem_slice(pem_str.as_bytes())
+            .expect("pem parse")
+            .to_vec();
+        let (_, cert) = X509Certificate::from_der(&der).expect("x509 parse");
+        // 将 subject DN 规范化为字符串用于比较
+        format!("{}", cert.subject())
     }
 
     #[test]
@@ -373,18 +373,18 @@ mod tests {
 
         let m2 = TlsManager::init(&dir, &secret).unwrap();
         assert_eq!(
-            m1.ca.key.serialize_der(),
-            m2.ca.key.serialize_der(),
+            m1.ca.issuer.key().serialize_der(),
+            m2.ca.issuer.key().serialize_der(),
             "CA key must be stable across restarts"
         );
         assert_eq!(
-            m1.ca.key.public_key_der(),
-            m2.ca.key.public_key_der(),
+            m1.ca.issuer.key().subject_public_key_info(),
+            m2.ca.issuer.key().subject_public_key_info(),
             "CA public key must be stable across restarts"
         );
         assert_eq!(
-            m1.ca.cert.params().distinguished_name,
-            m2.ca.cert.params().distinguished_name,
+            parse_subject_dn(m1.ca_cert_pem()),
+            parse_subject_dn(m2.ca_cert_pem()),
             "CA subject must be stable across restarts"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -543,18 +543,16 @@ mod tests {
         );
 
         // 新密钥下再次 init：可正常加载，不再重建。
-        // 注意 load_ca 会用同一密钥重新签名证书，PEM 字节会变（ECDSA 随机签名），
-        // 因此以密钥与证书身份（subject）为准比较稳定性。
         let m3 = TlsManager::init(&dir, &secret_b).unwrap();
         assert!(!m3.rebuilt());
         assert_eq!(
-            m2.ca.key.serialize_der(),
-            m3.ca.key.serialize_der(),
+            m2.ca.issuer.key().serialize_der(),
+            m3.ca.issuer.key().serialize_der(),
             "CA key must be stable across loads"
         );
         assert_eq!(
-            m2.ca.cert.params().distinguished_name,
-            m3.ca.cert.params().distinguished_name,
+            parse_subject_dn(m2.ca_cert_pem()),
+            parse_subject_dn(m3.ca_cert_pem()),
             "CA subject must be stable across loads"
         );
         let _ = std::fs::remove_dir_all(&dir);

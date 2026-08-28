@@ -3,16 +3,29 @@ pub mod commands;
 #[cfg(desktop)]
 mod tray;
 
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // tracing: 默认 WARN，RUST_LOG=debug 可开启
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .try_init();
+    let log_cfg = if cfg!(debug_assertions) {
+        lib::log::LogConfig {
+            tag: "[PROXY]".into(),
+            ..Default::default()
+        }
+    } else {
+        match lib::client::config::app_data_dir() {
+            Ok(dir) => lib::log::LogConfig {
+                tag: "[PROXY]".into(),
+                log_dir: Some(dir.join("logs")),
+                with_ansi: false,
+                ..Default::default()
+            },
+            Err(_) => lib::log::LogConfig {
+                tag: "[PROXY]".into(),
+                with_ansi: false,
+                ..Default::default()
+            },
+        }
+    };
+    let _ = lib::log::init(log_cfg);
     #[allow(unused)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

@@ -58,31 +58,43 @@ async-stream = { version = "0.3", optional = true }
 # client only (MITM TLS，不用于 wasm)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
-rcgen = { version = "0.13", default-features = false, features = ["pem", "ring", "x509-parser"], optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"], optional = true }
 moka = { version = "0.12", optional = true, features = ["sync"] }
 time = { version = "0.3", optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 dirs = { version = "6", optional = true }
-rand = { version = "0.8", optional = true }
+rand = { version = "0.10", optional = true }
 machine-uid = { version = "0.6.0", optional = true }
-#tracing = { version = "0.1", optional = true }
 
 postcard = { version = "1.1", features = ["alloc"] }
 
-
+# 统一日志
+tracing = { version = "0.1", features = ["attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "fmt", "ansi"], optional = true }
+rolling-file = { version = "0.2", optional = true }
 
 [features]
 default = ["client"]
 
-# 本地客户端：tokio 运行时 + HTTP 客户端 + MITM TLS
-client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:async-stream", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:moka", "dep:time", "dep:ipnetwork", "dep:reqwest-websocket", "dep:dirs", "dep:rand", "dep:machine-uid"]
+# 本地客户端：tokio 运行时 + HTTP 客户端 + MITM TLS + 统一日志(终端+1MB轮转文件)
+client = ["dep:tokio", "dep:reqwest", "dep:futures-util", "dep:async-stream", "dep:rustls", "dep:tokio-rustls", "dep:rcgen", "dep:moka", "dep:time", "dep:ipnetwork", "dep:reqwest-websocket", "dep:dirs", "dep:rand", "dep:machine-uid", "dep:tracing-subscriber", "dep:rolling-file"]
 
 # 服务端 (wasm) 构建：纯逻辑，无 tokio
 server = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
+tracing-wasm = { version = "0.2" }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+x509-parser = "0.18"
+
+[profile.release]
+#strip = "symbols"
+debug = 0
+opt-level = "z"
+lto = true
+codegen-units = 1

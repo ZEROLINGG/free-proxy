@@ -7,8 +7,6 @@ use httparse;
 const MAX_HEADER_SIZE: usize = 1024 * 1024;
 
 /// 单个 HTTP 请求允许的最大 header 条目数。
-/// 设为 pub(crate) 并在整个 crate 内复用，避免各处各写一份、
-/// 数值不同步导致真实（header 数量较多的）请求解析失败。
 pub(crate) const MAX_HEADERS: usize = 128;
 
 pub struct ReqHeader {
@@ -132,8 +130,7 @@ impl HeaderPaser {
 }
 
 
-/// 服务端专用：头帧的轻量借用解析（替代被废弃的 HttpReq 全量语义模型）。
-/// 只提取构造上游请求所需的最小信息，其余（version/body 等）一概不碰。
+/// 服务端专用：头帧的轻量借用解析。
 pub struct ParsedHead<'a> {
     pub method: &'a str,
     /// request-target：origin-form（"/x?y"）或 absolute-form（"http://..."）
@@ -145,7 +142,6 @@ pub struct ParsedHead<'a> {
 }
 
 /// 解析一个完整的请求头（含结尾 \r\n\r\n），全部借用输入字节。
-/// 不解析 chunked 语义：客户端盲传后请求 body 为原始字节，透传给上游。
 pub fn parse_head(raw: &[u8]) -> Result<ParsedHead<'_>> {
     if raw.len() > MAX_HEADER_SIZE {
         bail!("HTTP header too large ({} bytes)", raw.len());
@@ -250,8 +246,6 @@ impl std::fmt::Display for Url {
 
 
 /// 拆分 "host" / "host:port" / "[ipv6]:port" 形式的字符串。
-/// 用于支持配置携带端口（本地调试 wrangler dev 的 8787 等非特权端口）。
-/// 返回 (host, Option<port>)。
 pub fn split_host_port(s: &str) -> Result<(&str, Option<u16>)> {
     let s = s.trim();
     if s.is_empty() {

@@ -51,7 +51,7 @@ pub(crate) async fn proxy(
     Path((version, target)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, (StatusCode, String)> {
-    console_debug!("[wrangler:debug] [proxy http] start");
+    lib::debug!("start");
 
     let key16 = state.keys.key16;
     let key32 = state.keys.key32;
@@ -144,7 +144,7 @@ pub(crate) async fn proxy(
 
     // ---------- 构造并发出上游请求 ----------
     let mut init = worker::RequestInit::new();
-    console_debug!("[wrangler:debug] [proxy http] {:<7} {:<15.30} {:<15.30} content_length:{:?} buffer_mode:{buffer_mode}", head.method, head.host.unwrap_or("unknown"), head.target, content_length);
+    lib::debug!("{:<7} {:<15.30} {:<15.30} content_length:{:?} buffer_mode:{buffer_mode}", head.method, head.host.unwrap_or("unknown"), head.target, content_length);
 
     let method = match head.method {
         "GET" => worker::Method::Get,

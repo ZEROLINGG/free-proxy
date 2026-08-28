@@ -91,7 +91,7 @@ where
     {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("ws: tunnel handshake failed: {e:#}");
+            crate::error!("tunnel handshake failed: {e:#}");
             let _ = stream
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 .await;
@@ -101,7 +101,7 @@ where
     let mut ws = match upgraded.into_websocket().await {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("ws: tunnel upgrade failed: {e:#}");
+            crate::error!("tunnel upgrade failed: {e:#}");
             let _ = stream
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 .await;
@@ -244,7 +244,7 @@ where
                         }
                         // 服务端明确抛出的内部错误
                         WsTunnelMsg::Error(err_msg) => {
-                            eprintln!("ws: received explicit error from worker: {err_msg}");
+                            crate::error!("received explicit error from worker: {err_msg}");
                             let mut w = wr_download.lock().await;
 
                             if has_upgraded {
@@ -271,7 +271,7 @@ where
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("proxy ws: tunnel read error: {e}");
+                    crate::error!("tunnel read error: {e}");
                     return Err(e).context("ws tunnel read failed");
                 }
             }
@@ -284,12 +284,12 @@ where
     tokio::select! {
         res = upload => {
             if let Err(e) = res {
-                eprintln!("ws tunnel upload terminated with error: {e:#}");
+                crate::warn!("upload terminated with error: {e:#}");
             }
         }
         res = download => {
             if let Err(e) = res {
-                eprintln!("ws tunnel download terminated with error: {e:#}");
+                crate::warn!("download terminated with error: {e:#}");
             }
         }
     }

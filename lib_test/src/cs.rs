@@ -44,7 +44,10 @@ impl Server {
         let project_root = Self::project_root()?;
         let dev_vars_path = project_root.join("server-rs").join(".dev.vars");
 
-        let content = format!("key = \"{key}\"\ndomain = \"127.0.0.1\"\n");
+        let content = format!(r#"key = "{key}"
+domain = "127.0.0.1"
+log = "debug"
+"#);
 
         fs::write(&dev_vars_path, content)
             .await

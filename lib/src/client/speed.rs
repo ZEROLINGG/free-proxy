@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::http::{split_host_port, UrlBuilder};
+use crate::http::{UrlBuilder};
 use crate::speed_test::health::{batch_health, default_matcher};
 use crate::speed_test::ip::IpBuffer;
 use crate::speed_test::tcping::batch_tcping;
@@ -86,14 +86,7 @@ impl Default for SpeedTestOpts {
     }
 }
 
-/// domain 不允许携带端口：worker 侧密钥派生基于纯 host
-pub fn reject_domain_port(domain: &str) -> Result<()> {
-    let (_host, port) = split_host_port(domain)?;
-    if port.is_some() {
-        anyhow::bail!("domain不能携带端口, got {domain:?}");
-    }
-    Ok(())
-}
+
 
 /// 两阶段优选测速核心（无 UI 绑定）
 /// progress_tcping(done,total,rtt) / progress_health(done,total) 返回 false 表示中止
@@ -106,7 +99,6 @@ pub async fn run_two_phase(
     mut progress_health: impl FnMut(u64, u64) -> bool,
 ) -> Result<(Option<String>, Vec<(String, f32)>)> {
     let domain = domain.trim().to_string();
-    reject_domain_port(&domain)?;
 
     let total = opts.total.max(1);
     let tcping_timeout = Duration::from_millis(opts.tcping_timeout_ms.max(1));
@@ -200,7 +192,7 @@ pub async fn run_two_phase(
 /// 硬超时包装:整体超过 SESSION_HARD_DEADLINE 自动中止
 pub async fn with_deadline<F, T>(f: F) -> Result<T>
 where
-    F: std::future::Future<Output = Result<T>>,
+    F: Future<Output = Result<T>>,
 {
     tokio::select! {
         r = f => r,
@@ -214,7 +206,6 @@ where
 /// Worker 健康检查：并发探测（最多6并发，24 IP池），任一成功即返回 true
 pub async fn worker_health(domain: &str, auth_key: &str, pref_ip: Option<&str>) -> Result<bool> {
     let host = domain.trim().to_string();
-    reject_domain_port(&host)?;
     let token = {
         let keys = derive_keys(auth_key, &host).context("派生密钥失败")?;
         crate::proxy::gen_auth_token(&keys.token_base)

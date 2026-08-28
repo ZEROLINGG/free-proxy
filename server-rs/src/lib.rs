@@ -24,6 +24,13 @@ fn build_state(env: &Env) -> Result<DerivedKeys> {
 
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<axum::http::Response<Body>> {
+    #[cfg(target_arch = "wasm32")] {
+        static LOG_INIT: OnceLock<()> = OnceLock::new();
+        let log = env.var("log").map_or("info".into(), |v| v.to_string());
+        LOG_INIT.get_or_init(|| lib::log::init_wasm("[worker]", log));
+    }
+
+
     let keys = match STATE.get() {
         Some(s) => s.clone(),
         None => {

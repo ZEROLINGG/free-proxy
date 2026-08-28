@@ -1,4 +1,5 @@
 pub mod aead;
+pub mod log;
 pub mod algo;
 pub mod base;
 pub mod compress;

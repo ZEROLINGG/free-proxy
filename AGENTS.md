@@ -12,7 +12,7 @@ Five **standalone Rust crates, no root Cargo workspace** — Cargo commands fail
 - `server-rs/` — Cloudflare Worker (Rust → wasm32 via `worker-build`; worker crate 0.8 + axum)
 - `lib_test/` — E2E harness **binary** (`cargo run`, never `cargo test`)
 
-Leave alone: `client_tauri/src-tauri/gen/`, `icons/`, `image/`, `logs/`, `lib_test/src/latest_test.log`, per-crate `Cargo.lock`.
+Leave alone: `client_tauri/src-tauri/gen/`, `icons/`, `image/`, `logs/`, per-crate `Cargo.lock`.
 
 CLI and GUI deliberately share one config/CA directory (`app_data_dir/com.zz.freeproxy`) — the identifier is hardcoded in both `client_cli/src/config.rs` (`IDENTIFIER`) and the Tauri config; changing either desyncs the two clients.
 
@@ -93,7 +93,6 @@ Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `
   - `server-rs` depends on it with `default-features = false` (no tokio) and compiles to wasm32.
   - After changing `lib`, check **both** configurations (commands below) — native-only checks won't catch wasm-side breakage.
 - `server-rs`: plain `cargo check` inside its dir works for fast native typechecks; real builds/deploy go through wrangler (`worker-build`).
-- `domain` must never contain a port (enforced in `lib::proxy::Shared::new`): key derivation and token auth use the pure host on both ends — a port silently breaks auth with all-401s.
 
 ## Commands
 
@@ -111,6 +110,7 @@ Per-crate:
 - Wasm-side check of shared lib: `cd lib && cargo check --no-default-features --features server`
 - Security audit (run per crate; shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
 - Frontend typecheck+build: `pnpm install && pnpm build` inside `client_tauri/` (tsc + vite). Toolchain: Node 22, pnpm 10 (matches CI).
+- Unified logging (`lib/src/log.rs`): use `crate::error!/warn!/info!/debug!/trace!` (or `lib::*` from outside crates) instead of `eprintln!`/`console_error!`. Native entrypoints call `lib::log::init` (CLI: stderr + ANSI; GUI: `app_data_dir/logs/freeproxy.log`, ANSI off); the Worker lazily calls `lib::log::init_wasm` from `fetch`. Level/paths filter via `RUST_LOG` (e.g. `RUST_LOG=debug`). `lib::log::LogConfig` and native `init` are `#![cfg(feature = "client")]` — server crate compiles them out.
 
 ## CI
 
@@ -126,3 +126,20 @@ Per-crate:
 
 - `server-rs/wrangler.toml` sets `compatibility_flags = ["no_websocket_standard_binary_type"]`. Do not remove or "upgrade" this: worker crate 0.8 requires ArrayBuffer WS messages, and the modern default (compat date ≥ 2026-03-17) delivers Blobs, which silently empties WS tunnel frames. See comment in that file and upstream fix https://github.com/cloudflare/workers-rs/pull/1049 .
 - Secrets (`key`, `domain`) live in Cloudflare Worker secrets / `.dev.vars`. Never commit `.dev.vars*`, `*.pem`, `*.key`, etc. (all gitignored).
+
+## Documentation Sync (README.md)
+
+**MANDATORY RULE:** The root `README.md` is the face of the project. You MUST proactively review and update it in the same context if your changes trigger any of the following conditions:
+
+1. **UX & Feature Changes:**
+  - Modifying CLI arguments (`client_cli/src/main.rs` or `clap` structs).
+  - Adding/altering GUI pages or workflows in Tauri (`client_tauri/src`).
+  - Introducing new configuration fields in `settings.json` or changing the config logic.
+  - Changing API endpoints, subscription logic, or supported proxy protocols.
+2. **Setup & Architecture Changes:**
+  - Modifying npm/Cargo commands in `package.json` or `Makefile`.
+  - Changing default ports (e.g., Worker port 80, local proxy port 18081).
+  - Adding a new directory or crate.
+3. **Large-scale Refactoring:** Any change touching >5 files or altering the core data flow.
+
+**Agent Self-Check Prompt:** Before finishing a task, ask yourself: *"Does this code change make the current `README.md` obsolete, inaccurate, or missing new instructions?"* If yes, update `README.md` immediately. **Remember: Keep the README updates in Chinese.**

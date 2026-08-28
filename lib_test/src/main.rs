@@ -15,6 +15,11 @@ use crate::test::{base::*, http::*};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = lib::log::init(lib::log::LogConfig {
+        tag: "[Client]".into(),
+        default_level: "debug".into(),
+        ..Default::default()
+    });
     let mut server = Server::new()?;
     server.start().await?;
 
@@ -26,7 +31,6 @@ async fn main() -> Result<()> {
 
     let mut results = Vec::new();
 
-    // ── 一次执行全部 46 个 E2E 用例 ──
     ensure_health!(server, results,
         // ── 基础链路 ──
         (proxy_example_com_http, 15),

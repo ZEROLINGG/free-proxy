@@ -125,6 +125,9 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 **为什么首次启动链路异常？**
 需要去「IP 优选测速」页点测速选择一个ip，否则无优选ip会回退到DNS解析，将导致获得受DNS污染的ip或tls握手时受到sni阻断。
 
+**在哪里看日志 / 怎么开启 debug 日志？**
+客户端统一使用 `lib/log` 日志（`RUST_LOG` 控制等级与过滤，如 `RUST_LOG=debug`）。GUI 日志写入应用数据目录的 `logs/freeproxy.log`（1MB 轮转，ANSI 关闭）；命令行客户端输出到终端 stderr（带颜色）。Worker 端日志打印到控制台。
+
 ---
 
 ## 六、工作原理

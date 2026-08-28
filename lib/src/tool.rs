@@ -52,34 +52,11 @@ pub fn token_gen(token_base: &[u8; 16], now: u64, nonce: u64) -> String {
 #[cfg(feature = "client")]
 pub fn gen_auth_token(token_base: &[u8; 16]) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::LazyLock;
-    static TOKEN_NONCE: LazyLock<AtomicU64> = LazyLock::new(|| {
-        let m = [0u8; 1];
-        let n = vec![0u8; 1];
-        let x = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-        let y = m.as_ptr() as u128;
-        let z = n.as_ptr() as u128;
-        let mut t = (x ^ y ^ z)
-            .wrapping_mul(x)
-            .wrapping_mul(y)
-            .wrapping_mul(z);
-        for _ in 0..3 {
-            t = xoroshiro128(t);
-        }
-        AtomicU64::new(t as u64)
-    });
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-
-    let nonce = TOKEN_NONCE
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |curr| {
-            Some(xoroshiro128(curr as u128) as u64)
-        })
-        .unwrap_or_else(|v| v);
+    let nonce = rand::random::<u64>();
 
     token_gen(token_base, now, nonce)
 }

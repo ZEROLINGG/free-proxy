@@ -45,7 +45,7 @@ where
     let client = match client_result {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to build client: {e:#?}");
+            crate::error!("failed to build client: {e:#?}");
             return false;
         }
     };

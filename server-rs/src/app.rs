@@ -70,7 +70,7 @@ pub(crate) fn status_text(code: u16) -> &'static str {
 macro_rules! error {
     ($code:ident, $($arg:tt)*) => {{
         let err_msg = format!($($arg)*);
-        worker::console_error!("[{}:{}] {}", file!(), line!(), err_msg);
+        lib::error!("{err_msg}");
         (axum::http::StatusCode::$code, err_msg)
     }};
 }

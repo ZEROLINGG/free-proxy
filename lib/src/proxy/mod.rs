@@ -246,7 +246,7 @@ impl Proxy {
                 let (socket, addr) = match listener.accept().await {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("[Client:error] accept error: {e}");
+                        crate::error!("accept error: {e}");
                         break;
                     }
                 };
@@ -254,10 +254,9 @@ impl Proxy {
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(socket, shared).await {
                         if is_benign_disconnect(&e) {
-                            #[cfg(debug_assertions)]
-                            eprintln!("[Client:error] connection {addr}: {e} (benign disconnect)");
+                            crate::debug!("connection {addr}: {e} (benign disconnect)");
                         } else {
-                            eprintln!("[Client:error] connection {addr}: {:.1024?}...", format!("{e:#?}"));
+                            crate::error!("connection {addr}: {:.1024?}...", format!("{e:#?}"));
                         }
                     }
                 });

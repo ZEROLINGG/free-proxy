@@ -8,7 +8,7 @@ use super::Result;
 use anyhow::Result as AnyhowResult;
 pub use lib::client::speed::SpeedTestOpts;
 use lib::client::speed::{
-    SESSION_HARD_DEADLINE, reject_domain_port, run_two_phase, worker_health as lib_worker_health,
+    SESSION_HARD_DEADLINE, run_two_phase, worker_health as lib_worker_health,
 };
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -209,8 +209,6 @@ async fn run_speed_test_inner<R: Runtime>(
     cancel: &AtomicBool,
     gen: u64,
 ) -> AnyhowResult<SpeedOutcome> {
-    // 提前校验 domain 端口（与 lib 保持一致）
-    reject_domain_port(s.domain.trim())?;
 
     let total = opts.total.max(1);
 

@@ -148,6 +148,10 @@ struct SubscribeArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let _ = lib::log::init(lib::log::LogConfig {
+        tag: "[PROXY]".into(),
+        ..Default::default()
+    });
     let rt = tokio::runtime::Runtime::new().map_err(|e| anyhow!("初始化运行时失败: {e}"))?;
     match cli.cmd {
         Cmd::Run(a) => {
