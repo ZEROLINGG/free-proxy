@@ -2,6 +2,8 @@
   "name": "free-proxy",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "author": "ZEROLINGG <bcsz8833221@gmail.com>",
   "type": "module",
   "scripts": {
     "dev": "vite",

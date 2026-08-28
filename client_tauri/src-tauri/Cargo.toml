@@ -2,7 +2,7 @@
 name = "client_tauri"
 version = "0.1.1"
 description = "A Tauri App"
-authors = ["you"]
+authors = ["ZEROLINGG <bcsz8833221@gmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
 

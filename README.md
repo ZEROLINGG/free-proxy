@@ -225,3 +225,14 @@ cargo test -p lib
 <div><img alt="" src="./image/screenshot-20260818-164651.png"></div>
 <div><img alt="" src="./image/screenshot-20260818-164709.png"></div>
 
+---
+
+## 许可
+
+本项目采用 **MIT OR Apache-2.0** 双许可。
+
+- [MIT License](LICENSE-MIT) — Copyright (c) 2026 ZEROLINGG
+- [Apache License 2.0](LICENSE-APACHE) — Copyright 2026 ZEROLINGG
+
+贡献即视为同意以相同双许可分发。
+

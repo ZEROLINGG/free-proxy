@@ -1,4 +1,6 @@
 {
+  "license": "MIT OR Apache-2.0",
+  "author": "ZEROLINGG <bcsz8833221@gmail.com>",
   "engines": {
     "node": ">=22"
   },
