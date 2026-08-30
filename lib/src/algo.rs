@@ -10,10 +10,10 @@
 use anyhow::{Result, anyhow};
 
 use crate::aead::{
-    Aes128Gcm, Aes128GcmSiv, Aes256Gcm, Aes256GcmSiv, ChaCha20Poly1305, Cipher, XChaCha20Poly1305,
+    Aes128Gcm, Aes128GcmSiv, Aes256Gcm, Aes256GcmSiv, Ascon128, ChaCha20Poly1305, Cipher,
+    XChaCha20Poly1305,
 };
 use crate::compress::{Compressor, Gzip, Lz4, Zstd};
-use crate::tool::xor_obfuscate;
 
 /// 压缩算法（与 server-rs 的 URL version 参数映射，见下方 `version()`）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,8 +108,8 @@ pub enum ProxyAead {
     Aes256GcmSiv,
     ChaCha20Poly1305,
     XChaCha20Poly1305,
-    /// 不加密，仅做 XOR 混淆（XOR 自反，加解密同一表达式）
-    None,
+    /// NIST SP 800-232 Ascon-AEAD128（密钥/随机 nonce/tag 均为 16 字节）
+    Ascon128,
 }
 
 impl std::str::FromStr for ProxyAead {
@@ -123,7 +123,7 @@ impl std::str::FromStr for ProxyAead {
             "aes256gcmsiv" | "aes_256_gcm_siv" => Ok(Self::Aes256GcmSiv),
             "chacha20poly1305" | "chacha20_poly1305" => Ok(Self::ChaCha20Poly1305),
             "xchacha20poly1305" | "xchacha20_poly1305" => Ok(Self::XChaCha20Poly1305),
-            "none" => Ok(Self::None),
+            "ascon128" => Ok(Self::Ascon128),
             _ => Err(anyhow!("invalid aead: {s}")),
         }
     }
@@ -137,7 +137,7 @@ impl ProxyAead {
         Self::Aes256GcmSiv,
         Self::ChaCha20Poly1305,
         Self::XChaCha20Poly1305,
-        Self::None,
+        Self::Ascon128,
     ];
 
     /// 规范名称（与 `FromStr` 输入格式一致，供 UI/序列化使用）。
@@ -150,7 +150,7 @@ impl ProxyAead {
             Self::Aes256GcmSiv => "aes256gcmsiv",
             Self::ChaCha20Poly1305 => "chacha20poly1305",
             Self::XChaCha20Poly1305 => "xchacha20poly1305",
-            Self::None => "none",
+            Self::Ascon128 => "ascon128",
         }
     }
 
@@ -163,7 +163,7 @@ impl ProxyAead {
             Self::Aes256GcmSiv => "logout",
             Self::ChaCha20Poly1305 => "time",
             Self::XChaCha20Poly1305 => "log",
-            Self::None => "get",
+            Self::Ascon128 => "get",
         }
     }
 
@@ -176,12 +176,12 @@ impl ProxyAead {
             "logout" => Ok(Self::Aes256GcmSiv),
             "time" => Ok(Self::ChaCha20Poly1305),
             "log" => Ok(Self::XChaCha20Poly1305),
-            "get" => Ok(Self::None),
+            "get" => Ok(Self::Ascon128),
             _ => Err(anyhow!("invalid target: {s}")),
         }
     }
 
-    fn encrypt(self, data: &[u8], key16: &[u8], key32: &[u8]) -> Result<Vec<u8>> {
+    pub fn encrypt(self, data: &[u8], key16: &[u8], key32: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::Aes128Gcm => Aes128Gcm::encrypt(data, key16),
             Self::Aes256Gcm => Aes256Gcm::encrypt(data, key32),
@@ -189,11 +189,11 @@ impl ProxyAead {
             Self::Aes256GcmSiv => Aes256GcmSiv::encrypt(data, key32),
             Self::ChaCha20Poly1305 => ChaCha20Poly1305::encrypt(data, key32),
             Self::XChaCha20Poly1305 => XChaCha20Poly1305::encrypt(data, key32),
-            Self::None => Ok(xor_obfuscate(data, key16, key32)),
+            Self::Ascon128 => Ascon128::encrypt(data, key16),
         }
     }
 
-    fn decrypt(self, data: &[u8], key16: &[u8], key32: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(self, data: &[u8], key16: &[u8], key32: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::Aes128Gcm => Aes128Gcm::decrypt(data, key16),
             Self::Aes256Gcm => Aes256Gcm::decrypt(data, key32),
@@ -201,14 +201,14 @@ impl ProxyAead {
             Self::Aes256GcmSiv => Aes256GcmSiv::decrypt(data, key32),
             Self::ChaCha20Poly1305 => ChaCha20Poly1305::decrypt(data, key32),
             Self::XChaCha20Poly1305 => XChaCha20Poly1305::decrypt(data, key32),
-            Self::None => Ok(xor_obfuscate(data, key16, key32)),
+            Self::Ascon128 => Ascon128::decrypt(data, key16),
         }
     }
 }
 
 impl Default for ProxyAead {
     fn default() -> Self {
-        Self::Aes128Gcm
+        Self::Ascon128
     }
 }
 
@@ -279,7 +279,7 @@ mod tests {
             "/api/v3/log"
         );
         assert_eq!(
-            ProxyAlgo::new(ProxyCompressor::None, ProxyAead::None).api_path(),
+            ProxyAlgo::new(ProxyCompressor::None, ProxyAead::Ascon128).api_path(),
             "/api/v4/get"
         );
     }
@@ -299,7 +299,7 @@ mod tests {
             "/ws/v3/log"
         );
         assert_eq!(
-            ProxyAlgo::new(ProxyCompressor::None, ProxyAead::None).ws_path(),
+            ProxyAlgo::new(ProxyCompressor::None, ProxyAead::Ascon128).ws_path(),
             "/ws/v4/get"
         );
     }
@@ -367,40 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn test_xor_obfuscate_matches_server_vector() {
-        // 硬编码向量：与服务端 encode_chunk 的 "None" aead 实现逐字节对齐。
-        // 使用非平凡密钥与 >256 字节的 payload，覆盖 i*3 溢出 u8 的区间。
-        let key16 = [0x42u8; 16];
-        let key32 = [0x7Eu8; 32];
-        let data: Vec<u8> = (0..300u32)
-            .map(|i| (i.wrapping_mul(7) & 0xff) as u8)
-            .collect();
-
-        let out = xor_obfuscate(&data, &key16, &key32);
-
-        // 自反：解密（同一表达式）必须还原原文
-        assert_eq!(xor_obfuscate(&out, &key16, &key32), data);
-
-        // 首尾抽样固定向量（防止实现被无意改动而两端静默失配）
-        let mut expected = vec![0u8; 300];
-        for (i, e) in expected.iter_mut().enumerate() {
-            let k16 = key16[i % 16];
-            let k32 = key32[i % 32];
-            let c = i.wrapping_mul(3) as u8 % 163;
-            *e = data[i]
-                ^ (k16 ^ k32).wrapping_mul((k16 % 127).wrapping_add((k32 % 131).wrapping_add(c)));
-        }
-        assert_eq!(out, expected);
-        assert_eq!(
-            hex::encode(&out[..64]),
-            "00b36609cca712dd986b4ef1247fbae53083d6d99c57e28d483bfe4174afca1560d30669ac07b27d38cbae11c49f1a45902376b9fc3782f9a46f02d5581bd6a1"
-        );
-    }
-
-    #[test]
-    fn test_none_roundtrip_via_algo() {
+    fn test_ascon128_roundtrip_via_algo() {
         let compressor = ProxyCompressor::None;
-        let aead = ProxyAead::None;
+        let aead = ProxyAead::Ascon128;
         let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n\x00".to_vec();
         let key16 = [0x42u8; 16];
         let key32 = [0x7Eu8; 32];
@@ -408,6 +377,24 @@ mod tests {
         let enc = encode_chunk(&payload, compressor, aead, &key16, &key32).unwrap();
         let raw = decode_chunk(&enc, compressor, aead, &key16, &key32).unwrap();
         assert_eq!(raw, payload);
+    }
+
+    #[test]
+    fn test_ascon128_wire_header_vector() {
+        // 固定向量：锁定 /api/v4/get 的 Ascon encode_chunk 字节格式，
+        // 防止实现被无意改动而两端静默失配（Ascon 只依赖 key16）。
+        let key16 = [0x42u8; 16];
+        let key32 = [0x7Eu8; 32];
+        let payload = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+
+        let enc = encode_chunk(&payload, ProxyCompressor::None, ProxyAead::Ascon128, &key16, &key32)
+            .unwrap();
+        // 格式：16B nonce + 密文 + 16B tag；nonce 随机，仅锁长度与 tag 前缀校验可验
+        assert_eq!(enc.len(), 16 + payload.len() + 16);
+        // 往返仍是严格逆操作
+        let dec = decode_chunk(&enc, ProxyCompressor::None, ProxyAead::Ascon128, &key16, &key32)
+            .unwrap();
+        assert_eq!(dec, payload);
     }
 
     /// 端到端管线：服务端 pack_frame(encode_chunk) → 帧流 → 客户端 FrameCache → decode_chunk

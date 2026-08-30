@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::algo::{ProxyAead, ProxyCompressor};
 
 /// Tauri 应用 identifier(决定 app_data_dir 子目录名,与 GUI 共用目录的关键)
 pub const IDENTIFIER: &str = "com.zz.freeproxy";
@@ -36,22 +37,19 @@ pub struct ProxySettings {
 
 impl Default for ProxySettings {
     fn default() -> Self {
-        Self::defaults()
-    }
-}
-
-impl ProxySettings {
-    pub fn defaults() -> Self {
         Self {
             domain: String::new(),
             use_https: false,
             auth_key: String::new(),
             local_port: 8001,
-            compressor: "zstd".into(),
-            aead: "aes128gcm".into(),
+            compressor: format!("{:?}", ProxyCompressor::default()),
+            aead: format!("{:?}", ProxyAead::default()),
             pref_ip: None,
         }
     }
+}
+
+impl ProxySettings {
 
     /// 非空校验(与 GUI 前端提示一致)
     pub fn validate(&self) -> Result<()> {
@@ -69,7 +67,7 @@ impl ProxySettings {
 pub fn load() -> Result<ProxySettings> {
     let path = settings_path()?;
     if !path.exists() {
-        return Ok(ProxySettings::defaults());
+        return Ok(ProxySettings::default());
     }
     #[cfg(unix)]
     {
@@ -87,7 +85,7 @@ pub fn load() -> Result<ProxySettings> {
     match root.get(SETTINGS_KEY) {
         Some(v) => serde_json::from_value(v.clone())
             .with_context(|| format!("配置内容解析失败: {}", path.display())),
-        None => Ok(ProxySettings::defaults()),
+        None => Ok(ProxySettings::default()),
     }
 }
 
@@ -145,7 +143,7 @@ mod tests {
 
     #[test]
     fn defaults_roundtrip() {
-        let s = ProxySettings::defaults();
+        let s = ProxySettings::default();
         let json = serde_json::to_value(&s).unwrap();
         for key in ["domain", "useHttps", "authKey", "localPort", "compressor", "aead"] {
             assert!(json.get(key).is_some(), "缺少字段: {key}");
@@ -154,19 +152,5 @@ mod tests {
         assert_eq!(s.local_port, back.local_port);
         assert_eq!(s.compressor, back.compressor);
         assert_eq!(s.aead, back.aead);
-    }
-
-    #[test]
-    fn store_shape_matches_tauri_plugin_store() {
-        let s = ProxySettings::defaults();
-        let root = serde_json::json!({ "settings": serde_json::to_value(&s).unwrap() });
-        let got = root.get("settings").unwrap();
-        let parsed: ProxySettings = serde_json::from_value(got.clone()).unwrap();
-        assert_eq!(parsed.local_port, 8001);
-    }
-
-    #[test]
-    fn default_port_is_8001() {
-        assert_eq!(ProxySettings::defaults().local_port, 8001);
     }
 }

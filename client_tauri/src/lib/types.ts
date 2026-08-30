@@ -7,7 +7,7 @@ export type Aead =
   | "aes256gcmsiv"
   | "chacha20poly1305"
   | "xchacha20poly1305"
-  | "none";
+  | "ascon128";
 
 export interface ProxySettings {
   domain: string;
@@ -105,7 +105,7 @@ export const AEADS: { value: Aead; label: string }[] = [
   { value: "aes256gcmsiv", label: "AES-256-GCM-SIV" },
   { value: "chacha20poly1305", label: "ChaCha20-Poly1305" },
   { value: "xchacha20poly1305", label: "XChaCha20-Poly1305" },
-  { value: "none", label: "None（异或混淆）" },
+  { value: "ascon128", label: "Ascon-AEAD128" },
 ];
 
 // 以下默认值必须与 Rust 端 src-tauri/src/commands/settings.rs 的默认函数保持一致
@@ -115,8 +115,8 @@ export const DEFAULT_SETTINGS: ProxySettings = {
   useHttps: false,
   authKey: "",
   localPort: 8001,
-  compressor: "zstd",
-  aead: "aes128gcm",
+  compressor: "lz4",
+  aead: "ascon128",
   prefIp: null,
 };
 

@@ -285,7 +285,7 @@ export function Dashboard() {
               aria-label="加密算法"
               disabled={hotBusy}
               value={shownAead}
-              onChange={(e) => void onHotAead(e.target.value as Aead)}
+              onChange={(e) => void onHotAead(e.target.value.toLowerCase() as Aead)}
             >
               {AEADS.map((a) => (
                 <option key={a.value} value={a.value}>
@@ -300,7 +300,7 @@ export function Dashboard() {
               aria-label="压缩算法"
               disabled={hotBusy}
               value={shownComp}
-              onChange={(e) => void onHotComp(e.target.value as Compressor)}
+              onChange={(e) => void onHotComp(e.target.value.toLowerCase() as Compressor)}
             >
               {COMPRESSORS.map((c) => (
                 <option key={c.value} value={c.value}>

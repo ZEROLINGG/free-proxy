@@ -5,8 +5,9 @@ use axum::response::Response;
 use axum::extract::{Path, Request, State};
 use futures_util::stream::{LocalBoxStream, Stream};
 use futures_util::StreamExt;
+use std::io::Write;
 use worker::send::IntoSendFuture;
-use worker::{Fetch,console_debug};
+use worker::Fetch;
 
 use js_sys::Uint8Array;
 
@@ -53,6 +54,15 @@ pub(crate) async fn proxy(
 ) -> Result<Response, (StatusCode, String)> {
     lib::debug!("start");
 
+    let experimental = state.env.var("experimental")
+        .map(|v| v.to_string())
+        .map_or(false, |v| {
+            let s = v.trim();
+            s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("1") ||
+                s.eq_ignore_ascii_case("use") || s.eq_ignore_ascii_case("enable")
+        });
+
+
     let key16 = state.keys.key16;
     let key32 = state.keys.key32;
 
@@ -63,7 +73,6 @@ pub(crate) async fn proxy(
         .map_err(|_| error!(BAD_REQUEST, "unsupported api: {}", target))?;
 
     // ---------- 阶段 1：读取头帧（head + https 标志位，末尾字节） ----------
-    // 请求体以帧流形式到达：第一帧是头帧，之后是 body 帧，零长帧 = EOS。
     let mut incoming = req.into_body().into_data_stream();
     let mut parser = FrameCache::new();
     let head_frame = loop {
@@ -77,12 +86,8 @@ pub(crate) async fn proxy(
         }
         match incoming.next().await {
             Some(Ok(b)) => parser.push(&b),
-            Some(Err(_)) => {
-                return Err(error!(BAD_REQUEST, "request body read error"))
-            }
-            None => {
-                return Err(error!(BAD_REQUEST, "request body truncated (no head frame)"))
-            }
+            Some(Err(_)) => return Err(error!(BAD_REQUEST, "request body read error")),
+            None => return Err(error!(BAD_REQUEST, "request body truncated (no head frame)")),
         }
     };
 
@@ -92,18 +97,13 @@ pub(crate) async fn proxy(
     if data.is_empty() {
         return Err(error!(BAD_REQUEST, "Unprocessable Request"));
     }
-    let protocol = if data[data.len() - 1] % 2 == 0 {
-        "http"
-    } else {
-        "https"
-    };
-    // 轻量借用解析：只提取 method/target/host/headers，其余语义一概不碰
+    let protocol = if data[data.len() - 1] % 2 == 0 { "http" } else { "https" };
+
     let head = parse_head(&data[..data.len() - 1])
         .map_err(|_| error!(BAD_REQUEST, "Unprocessable Request"))?;
 
     // HTTP/1.1 请求必须携带 Host；absolute-form 的 request-target 自带权威信息
-    let is_absolute_form =
-        head.target.starts_with("http://") || head.target.starts_with("https://");
+    let is_absolute_form = head.target.starts_with("http://") || head.target.starts_with("https://");
     if head.host.is_none() && !is_absolute_form {
         return Err(error!(BAD_REQUEST, "Missing Host header"));
     }
@@ -124,9 +124,6 @@ pub(crate) async fn proxy(
     }
 
     // ---------- 定长缓冲判定 ----------
-    // worker::Body::from_stream 恒为 ReadableStream，workerd 按 body 类型强制 chunked，
-    // 手动 content-length 被 Fetch 规范禁用。仅当 content-length 已知且 < 26MiB 时
-    // 改为缓冲 Uint8Array（BufferSource）作 body，上游才能收到定长 content-length。
     let mut content_length: Option<u64> = None;
     let mut transfer_encoding_chunked = false;
     for (k, v) in head.headers.iter() {
@@ -138,9 +135,11 @@ pub(crate) async fn proxy(
                 .any(|t| t.trim().eq_ignore_ascii_case("chunked"));
         }
     }
-    const BUFFER_THRESHOLD: u64 = 26 * 1024 * 1024; // 26MiB
+
+    const BUFFER_THRESHOLD: u64 = 8 * 1024 * 1024;
     let buffer_mode = !transfer_encoding_chunked
-        && content_length.is_some_and(|cl| cl < BUFFER_THRESHOLD);
+        && content_length.is_some_and(|cl| cl < BUFFER_THRESHOLD)
+        && experimental;
 
     // ---------- 构造并发出上游请求 ----------
     let mut init = worker::RequestInit::new();
@@ -157,17 +156,8 @@ pub(crate) async fn proxy(
         _ => worker::Method::Get,
     };
     init.with_method(method.clone());
-    // 重定向改为 manual：不跟随（否则无 cookie jar 的 fetch 会把
-    // 302→sorry→302 之类的 cookie 依赖型重定向循环跟满 20 次后报
-    // "Too many redirects"），3xx 响应连同 Location/Set-Cookie 原样
-    // 转发给浏览器，由浏览器按原生语义处理重定向与 cookie。
     init.with_redirect(worker::RequestRedirect::Manual);
 
-    // 过滤 hop-by-hop 与代理专用头（RFC 7230 §6.1 + Proxy-Connection）和 cf特征头：
-    // - content-length/transfer-encoding 统一丢弃，由 workerd 按 body 类型重定长（缓冲=定长，流=chunked）
-    // - expect/connection/keep-alive/upgrade 等为跃点语义，origin 不应看到
-    // - proxy-connection/proxy-authorization 为代理专用伪头，泄露有风险
-    // - via/x-forwarded-* 防伪造，剥离后不重建
     let fetch_headers = worker::Headers::new();
     for (k, v) in head.headers.iter() {
         if [
@@ -177,8 +167,8 @@ pub(crate) async fn proxy(
             "via", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
             "cf-worker"
         ]
-        .iter()
-        .any(|&h| k.eq_ignore_ascii_case(h))
+            .iter()
+            .any(|&h| k.eq_ignore_ascii_case(h))
         {
             continue;
         }
@@ -190,8 +180,6 @@ pub(crate) async fn proxy(
 
     if method != worker::Method::Get && method != worker::Method::Head {
         if buffer_mode {
-            // ---------- 定长缓冲：完整解包后以 Uint8Array 作 body ----------
-            // workerd 对 BufferSource 自动定长（content-length），上游不再是 chunked。
             let expect = content_length.unwrap_or(0) as usize;
             let mut buf: Vec<u8> = Vec::with_capacity(expect);
             for f in initial_frames {
@@ -211,19 +199,14 @@ pub(crate) async fn proxy(
                                             .map_err(|e| error!(BAD_REQUEST, "decode body frame failed: {}", e))?;
                                         buf.extend_from_slice(&raw);
                                     }
-                                    Ok(Frame::Eos) => break 'drain, // 请求体正常结束
+                                    Ok(Frame::Eos) => break 'drain,
                                     Ok(Frame::None) => break,
                                     Err(e) => return Err(error!(BAD_REQUEST, "frame error: {}", e)),
                                 }
                             }
                         }
-                        Some(Err(_)) => {
-                            return Err(error!(BAD_REQUEST, "request body read error"));
-                        }
-                        // EOF 而未收到 EOS = 截断
-                        None => {
-                            return Err(error!(BAD_GATEWAY, "request body truncated (no EOS)"));
-                        }
+                        Some(Err(_)) => return Err(error!(BAD_REQUEST, "request body read error")),
+                        None => return Err(error!(BAD_GATEWAY, "request body truncated (no EOS)")),
                     }
                 }
             }
@@ -239,16 +222,11 @@ pub(crate) async fn proxy(
             arr.copy_from(&buf);
             init.with_body(Some(arr.into()));
         } else {
-            // ---------- 流式 body：解密的帧字节直接喂给上游 fetch（pull 驱动） ----------
-            // 客户端边传我们边解帧边转发，EOS 前上游请求体一直处于"未完成"状态。
             let upstream_body = async_stream::stream! {
                 for f in initial_frames {
                     match decode_chunk(&f, compressor, aead, &key16, &key32) {
                         Ok(raw) => yield Ok(raw),
-                        Err(e) => {
-                            yield Err(format!("{e}"));
-                            return;
-                        }
+                        Err(e) => { yield Err(format!("{e}")); return; }
                     }
                 }
                 if !saw_eos {
@@ -261,30 +239,17 @@ pub(crate) async fn proxy(
                                         Ok(Frame::Frame(f)) => {
                                             match decode_chunk(&f, compressor, aead, &key16, &key32) {
                                                 Ok(raw) => yield Ok(raw),
-                                                Err(e) => {
-                                                    yield Err(format!("{e}"));
-                                                    return;
-                                                }
+                                                Err(e) => { yield Err(format!("{e}")); return; }
                                             }
                                         }
-                                        Ok(Frame::Eos) => return, // 请求体正常结束
+                                        Ok(Frame::Eos) => return,
                                         Ok(Frame::None) => break,
-                                        Err(e) => {
-                                            yield Err(format!("frame error: {e}"));
-                                            return;
-                                        }
+                                        Err(e) => { yield Err(format!("frame error: {e}")); return; }
                                     }
                                 }
                             }
-                            Some(Err(_)) => {
-                                yield Err("request body read error".to_string());
-                                return;
-                            }
-                            // EOF 而未收到 EOS = 截断：让上游 fetch 报错，客户端得到 502
-                            None => {
-                                yield Err("request body truncated (no EOS)".to_string());
-                                return;
-                            }
+                            Some(Err(_)) => { yield Err("request body read error".to_string()); return; }
+                            None => { yield Err("request body truncated (no EOS)".to_string()); return; }
                         }
                     }
                 }
@@ -297,7 +262,6 @@ pub(crate) async fn proxy(
         }
     }
 
-    // 直构上游 URL：absolute-form 直接用 request-target；否则 Host 头 + origin-form
     let full_url = if is_absolute_form {
         head.target.to_string()
     } else {
@@ -323,71 +287,50 @@ pub(crate) async fn proxy(
     let resp_headers: Vec<(String, String)> = upstream_resp.headers().entries().collect();
     let is_head = method == worker::Method::Head;
 
-    // 上游响应体可能为空（HEAD / 204 / 304 / 1xx 等）：此时 `web_sys::Response.body()`
-    // 为 null，worker::Response::stream() 会报 "body is not streamable" 并让整个请求 500。
-    // 按 ResponseBody 分派：Stream → 原样转发；Body(vec) → 单块流；Empty → 空流。
     let body_stream: LocalBoxStream<'static, Result<Vec<u8>, worker::Error>> =
         match upstream_resp.into_parts().1 {
             worker::ResponseBody::Stream(s) => Box::pin(worker::ByteStream::from(s)),
-            worker::ResponseBody::Body(bytes) => Box::pin(futures_util::stream::once(async move {
-                Ok(bytes)
-            })),
+            worker::ResponseBody::Body(bytes) => Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
             worker::ResponseBody::Empty => Box::pin(futures_util::stream::empty()),
         };
 
-    // 枚举为 Copy，可直接移入流闭包
     let compressor = compressor;
     let aead = aead;
 
-    // ============================================================
-    // 核心：流式把 "status line + headers + (chunked) body" 逐段打包
-    // 每个帧都是独立可解密/解压的最小单元，帧间无分隔符、EOF 即完成。
-    // 客户端解包后直接把明文字节按顺序写入 TCP 即可，无需理解 HTTP 语义。
-    // ============================================================
     let stream = async_stream::stream! {
         let mut body_stream = body_stream;
 
         // ---------- 1. status line + headers ----------
-        // 上游的 framing/编码信息经 Workers Fetch 后已不再成立：
-        // 因此统一丢弃，body 一律用 chunked 重新分帧。
         let body_allowed = !is_head && status != 204 && status != 304;
         let use_chunked = body_allowed;
 
-        let mut head = Vec::new();
-        head.extend_from_slice(
-            format!("HTTP/1.1 {} {}\r\n", status, status_text(status)).as_bytes(),
-        );
+        let mut head_buf = Vec::with_capacity(512);
+        let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));
         for (k, v) in resp_headers.iter() {
-            if ["content-length", "content-encoding"]
-            .iter().any(|&h| k.eq_ignore_ascii_case(h))
+            if ["content-length", "transfer-encoding", "content-encoding"]
+                .iter()
+                .any(|&h| k.eq_ignore_ascii_case(h))
             {
                 continue;
             }
-            head.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
+            let _ = write!(&mut head_buf, "{}: {}\r\n", k, v);
         }
         if use_chunked {
-            head.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+            head_buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
         }
-        head.extend_from_slice(b"\r\n");
+        head_buf.extend_from_slice(b"\r\n");
 
-        match pack_frame(&head, compressor, aead, &key16, &key32) {
+        match pack_frame(&head_buf, compressor, aead, &key16, &key32) {
             Ok(frame) => yield Ok(Bytes::from(frame)),
-            Err(e) => {
-                yield Err(std::io::Error::other(format!("pack frame failed: {e}")));
-                return;
-            }
+            Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
         }
 
         // ---------- 2. body ----------
         if !is_head {
             loop {
-                let next = body_stream.next().await;
-                let bytes = match next {
+                let bytes = match body_stream.next().await {
                     Some(Ok(b)) => b,
-                    Some(Err(e)) => {
-                        yield Err(std::io::Error::other(format!("{e:?}")));
-                        return;
-                    }
+                    Some(Err(e)) => { yield Err(std::io::Error::other(format!("{e:?}"))); return; }
                     None => break,
                 };
 
@@ -396,36 +339,32 @@ pub(crate) async fn proxy(
                 }
 
                 let framed: Vec<u8> = if use_chunked {
-                    let mut v = format!("{:x}\r\n", bytes.len()).into_bytes();
-                    v.extend_from_slice(&bytes);
-                    v.extend_from_slice(b"\r\n");
-                    v
+                    // 容量计算：16字节(留给 hex length) + \r\n (2字节) + bytes大小 + \r\n (2字节) = 20字节
+                    let mut chunk_buf = Vec::with_capacity(bytes.len() + 20);
+                    let _ = write!(&mut chunk_buf, "{:x}\r\n", bytes.len());
+                    chunk_buf.extend_from_slice(&bytes);
+                    chunk_buf.extend_from_slice(b"\r\n");
+                    chunk_buf
                 } else {
                     bytes
                 };
 
                 match pack_frame(&framed, compressor, aead, &key16, &key32) {
                     Ok(frame) => yield Ok(Bytes::from(frame)),
-                    Err(e) => {
-                        yield Err(std::io::Error::other(format!("pack frame failed: {e}")));
-                        return;
-                    }
+                    Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
                 }
             }
 
             if use_chunked {
-                let tail = b"0\r\n\r\n".to_vec();
-                match pack_frame(&tail, compressor, aead, &key16, &key32) {
+                let tail = b"0\r\n\r\n";
+                match pack_frame(tail, compressor, aead, &key16, &key32) {
                     Ok(frame) => yield Ok(Bytes::from(frame)),
-                    Err(e) => {
-                        yield Err(std::io::Error::other(format!("pack frame failed: {e}")));
-                        return;
-                    }
+                    Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
                 }
             }
         }
 
-        // 零长帧 = EOS 结束标记（客户端以此区分正常结束与截断）
+        // 零长帧 = EOS
         yield Ok(Bytes::from(make_frame(b"")));
     };
 

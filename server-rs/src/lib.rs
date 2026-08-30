@@ -43,6 +43,7 @@ async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<axum::http::R
     Ok(app::router(app::AppState {
         keys,
         ctx: Arc::new(ctx),
+        env: Arc::new(env),
     })
     .call(req)
     .await?)

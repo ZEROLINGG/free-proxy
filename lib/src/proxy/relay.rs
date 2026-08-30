@@ -325,7 +325,6 @@ where
     // ---------- 响应阶段：等待 worker 响应并回传 ----------
     let resp = match early_resp {
         Some(r) => r,
-        // 【修改点 3】：这里的 timeout 目标也由原先的 resp_fut 改为 resp_task
         None => match timeout(FRAME_IDLE_TIMEOUT, &mut resp_task).await {
             Ok(Ok(Ok(r))) => r,
             Ok(Ok(Err(e))) => return Err(anyhow::Error::new(e).context("worker request failed")),

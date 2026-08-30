@@ -61,27 +61,6 @@ pub fn gen_auth_token(token_base: &[u8; 16]) -> String {
     token_gen(token_base, now, nonce)
 }
 
-pub fn xor_obfuscate<D, K16, K32>(data: D, key16: K16, key32: K32) -> Vec<u8>
-where
-    D: AsRef<[u8]>,
-    K16: AsRef<[u8]>,
-    K32: AsRef<[u8]>,
-{
-    let key16 = key16.as_ref();
-    let key32 = key32.as_ref();
-    data.as_ref()
-        .iter()
-        .enumerate()
-        .map(|(i, &b)| {
-            let k16 = key16[i % key16.len()];
-            let k32 = key32[i % key32.len()];
-            b ^ (k16 ^ k32).wrapping_mul(
-                (k16 % 127).wrapping_add((k32 % 131).wrapping_add(i.wrapping_mul(3) as u8 % 163)),
-            )
-        })
-        .collect()
-}
-
 #[derive(Clone, Debug)]
 pub struct DerivedKeys {
     pub key16: [u8; 16],

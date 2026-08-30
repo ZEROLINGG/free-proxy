@@ -20,6 +20,10 @@ base91 = "0.1.0"
 aes-gcm = { version = "0.11", features = ["rand_core", "getrandom"] }
 aes-gcm-siv = { version = "0.12", features = ["rand_core", "getrandom"] }
 chacha20poly1305 = { version = "0.11", features = ["rand_core", "getrandom"] }
+# ascon-aead128 0.1.1 声明 ascon ^0.5.0-rc.0，但其预发布版 API（State::new/permute_12）
+# 与最终 0.5.0（仅自由函数）不兼容，必须精确锁定 rc.0（RustCrypto 上游打包缺陷）
+ascon = "=0.5.0-rc.0"
+ascon-aead128 = "0.1.1"
 
 # compress
 lz4_flex = "0.14"

@@ -85,6 +85,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "ascon"
+version = "0.5.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "953707d565de11d13f8cf7d880e9a46c9c403693cb7d79dcfa49feaac2d2020f"
+
+[[package]]
+name = "ascon-aead128"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1ac78bb31181b7913876a83f579e65b25add9380c7773245e68be73a79cbdd0"
+dependencies = [
+ "aead",
+ "ascon",
+ "ctutils",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -902,6 +919,8 @@ dependencies = [
  "aes-gcm",
  "aes-gcm-siv",
  "anyhow",
+ "ascon",
+ "ascon-aead128",
  "base64",
  "base91",
  "blake3",

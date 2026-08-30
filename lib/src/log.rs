@@ -218,6 +218,7 @@ pub fn init(cfg: LogConfig) -> std::io::Result<()> {
 /// 初始化日志（wasm worker：输出到控制台）。
 #[cfg(target_arch = "wasm32")]
 pub fn init_wasm(tag: impl Into<String>, default_level: impl AsRef<str>) {
+    #[allow(unused)]
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
 

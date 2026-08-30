@@ -15,14 +15,14 @@ use crate::test::{base::*, http::*};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut server = Server::new()?;
+    server.start().await?;
+
     let _ = lib::log::init(lib::log::LogConfig {
         tag: "[Client]".into(),
         default_level: "debug".into(),
         ..Default::default()
     });
-    let mut server = Server::new()?;
-    server.start().await?;
-
     let mut client = Client::new(server.key().unwrap())?;
     client.start().await?;
 

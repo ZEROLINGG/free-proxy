@@ -19,7 +19,7 @@
 - **免费**：全部依赖 Cloudflare 免费额度，零月租、零维护成本；
 - **独享**：节点只属于你，认证密钥只在你和设备两端；
 - **省流量**：内置压缩（zstd / gzip / lz4），相同内容传得少、跑得快；
-- **更安全**：多种加密算法可选（AES-GCM / ChaCha20-Poly1305 等），传输内容被加密；
+- **更安全**：多种加密算法可选（AES-GCM / GCM-SIV / ChaCha20-Poly1305 / Ascon-AEAD128 等），传输内容被加密；
 - **自动挑最快的路**：内置「优选 IP」测速工具，帮你找到与 Worker 之间最快的网络路径；
 - **全家桶通用**：客户端可一键导出订阅链接，Clash / sing-box / v2rayN 等工具都能用；
 - **WebSocket支持**：内置 WebSocket 隧道，聊天 / 推送 / 在线协作等基于 `ws://` / `wss://` 的应用同样走加密代理；
@@ -182,10 +182,10 @@ free-proxy/
 │       ├── algo.rs       # 算法分发：压缩 × 加密组合与 URL 契约
 │       ├── frames.rs     # 私有二进制帧流协议（[4B 长度 | 负载]，零长帧 = 结束）
 │       ├── http.rs       # HTTP 头解析（httparse，零拷贝）
-│       ├── aead.rs       # AES-GCM / AES-GCM-SIV / ChaCha20-Poly1305…
+│       ├── aead.rs       # AES-GCM / AES-GCM-SIV / ChaCha20-Poly1305 / Ascon-AEAD128 (NIST SP 800-232)
 │       ├── compress.rs   # zstd / gzip / lz4
 │       ├── kdf.rs        # PBKDF2 / scrypt / HKDF
-│       ├── tool.rs       # 密钥派生、时间窗令牌、异或混淆
+│       ├── tool.rs       # 密钥派生、时间窗令牌
 │       ├── ws.rs         # WebSocket 协议层：RFC 6455 帧解析 / 分片重组 / 隧道消息（WsTunnelMsg）
 │       └── proxy/        # 客户端本地代理 + MITM TLS（tls.rs）+ WS 隧道（ws.rs）
 │       └── speed_test/   # tcping / health 两阶段优选 IP 测速

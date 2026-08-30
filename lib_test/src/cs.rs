@@ -1,8 +1,8 @@
 #![allow(unused)]
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use lib::algo::{ProxyAead, ProxyCompressor};
 use lib::proxy::{Proxy, ProxyConfig};
-use lib::tool::{derive_keys, gen_auth_token, DerivedKeys};
+use lib::tool::{DerivedKeys, derive_keys, gen_auth_token};
 use shell_engine::Shell;
 use std::env;
 use std::net::TcpListener;
@@ -16,7 +16,7 @@ use tokio::time::sleep;
 pub struct Server {
     child: Option<Shell>,
     key: Option<String>,
-    crash_flag: Option<Arc<AtomicBool>>
+    crash_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Server {
@@ -44,10 +44,12 @@ impl Server {
         let project_root = Self::project_root()?;
         let dev_vars_path = project_root.join("server-rs").join(".dev.vars");
 
-        let content = format!(r#"key = "{key}"
+        let content = format!(
+            r#"key = "{key}"
 domain = "127.0.0.1"
 log = "debug"
-"#);
+"#
+        );
 
         fs::write(&dev_vars_path, content)
             .await
@@ -94,7 +96,7 @@ log = "debug"
         let crash_flag = Arc::new(AtomicBool::new(false));
         let crash_flag_clone = crash_flag.clone();
 
-        let mut child = Shell::new("bash")
+        let mut child = Shell::new(if cfg!(windows) { "powershell" } else { "sh" })
             .enable_pty()
             .work_dir(Self::project_root()?)
             .disable_snapshot()
@@ -116,7 +118,7 @@ log = "debug"
                         && !(line.contains("│  [c] ") && line.contains("clear console"))
                         && !(line.contains("│  [x] ") && line.contains("to exit"))
                         && !line.contains("╰───────────────────────────╯")
-                        && !line.contains("⎔ Starting local server...")
+                        && !line.contains("Starting local server...")
                         && !line.contains("Local package.json exists, but node_modules missing, did you mean to install?")
                         && !(line.contains("bash") && line.contains("$"))
                         && !(line.contains("> @ server-dev ") && line.contains("free-proxy"))
@@ -124,6 +126,15 @@ log = "debug"
                         && !line.contains("If you think this is a bug then please create an issue at")
                         && !line.contains("Command failed with exit code 1.")
                         && !(line.contains("✘") && line.contains("ERROR") && line.contains("[") && line.contains("]") && line.contains(" "))
+                        && !line.contains("Note that there is a newer version of Wrangler available")
+                        && !line.contains("Windows PowerShell")
+                        && !line.contains("Copyright (C) Microsoft Corporation.")
+                        && !line.contains("All rights reserved.")
+                        && !line.contains("Install the latest PowerShell for new features and improvements!")
+                        && !line.contains("https://aka.ms/PSWindows")
+                        && !(line.starts_with("PS ") && line.contains(">"))
+                        && !line.contains("Loading personal and system profiles took")
+
                     {
                         if line.contains("444 [ERROR]:server-dev 444") {
                             eprintln!("\x1b[1;31m[ERROR]wrangler crashed abnormally!!!\x1b[0m");
@@ -187,12 +198,12 @@ log = "debug"
             Ok(resp) => {
                 resp.status().is_success()
                     && resp
-                    .text()
-                    .await
-                    .unwrap_or_default()
-                    .trim()
-                    .parse::<u64>()
-                    .is_ok()
+                        .text()
+                        .await
+                        .unwrap_or_default()
+                        .trim()
+                        .parse::<u64>()
+                        .is_ok()
             }
             Err(_) => false,
         };
@@ -210,7 +221,8 @@ log = "debug"
             .context("failed to build health probe client")?;
 
         let mut consecutive = 0u32;
-        for _ in 0..60 * 45 {   // 首次需要构建
+        for _ in 0..60 * 45 {
+            // 首次需要构建
             // 检查崩溃标志，一旦置位立即退出
             if let Some(flag) = &self.crash_flag {
                 if flag.load(Ordering::SeqCst) {

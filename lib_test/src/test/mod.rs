@@ -50,6 +50,7 @@ macro_rules! test_fn {
 
         let mut run_results = Vec::with_capacity($repeat_count);
 
+        // 串行确保稳定和日志不乱序
         for run_idx in 1..=$repeat_count {
             $hook
             let start_time = std::time::Instant::now();

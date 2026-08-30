@@ -3,7 +3,6 @@ use tauri_plugin_store::StoreExt;
 
 use super::Result;
 
-// 复用 lib 单一真源，端口已统一 8001
 pub use lib::client::config::ProxySettings;
 use lib::client::config::{SETTINGS_KEY, STORE_FILE};
 
