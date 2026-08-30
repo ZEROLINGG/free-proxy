@@ -1,4 +1,4 @@
-use lib::proxy::{Proxy, ProxyAead, ProxyCompressor, ProxyConfig, TlsManager};
+use lib::proxy::{Proxy, ProxyConfig, TlsManager};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
@@ -6,7 +6,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_machine_uid::MachineUidExt;
 use tauri_plugin_opener::OpenerExt;
-
+use lib::algo::{ProxyAead, ProxyCompressor};
 use super::settings::ProxySettings;
 use super::Result;
 

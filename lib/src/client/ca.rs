@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::proxy::TlsManager;
+use crate::proxy::tls::TlsManager;
 
 use super::config::app_data_dir;
 

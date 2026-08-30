@@ -7,7 +7,7 @@ use crate::http::{UrlBuilder};
 use crate::speed_test::health::{batch_health, default_matcher};
 use crate::speed_test::ip::IpBuffer;
 use crate::speed_test::tcping::batch_tcping;
-use crate::tool::derive_keys;
+use crate::tool::{derive_keys, gen_auth_token};
 
 /// 会话整体时长上限
 pub const SESSION_HARD_DEADLINE: Duration = Duration::from_secs(120);
@@ -147,7 +147,7 @@ pub async fn run_two_phase(
 
     let token = {
         let keys = derive_keys(auth_key, &domain).context("派生密钥失败")?;
-        crate::proxy::gen_auth_token(&keys.token_base)
+        gen_auth_token(&keys.token_base)
     };
 
     let mut last_emit = Instant::now();
@@ -208,7 +208,7 @@ pub async fn worker_health(domain: &str, auth_key: &str, pref_ip: Option<&str>) 
     let host = domain.trim().to_string();
     let token = {
         let keys = derive_keys(auth_key, &host).context("派生密钥失败")?;
-        crate::proxy::gen_auth_token(&keys.token_base)
+        gen_auth_token(&keys.token_base)
     };
 
     let mut ips: Vec<String> = Vec::new();

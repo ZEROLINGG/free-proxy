@@ -12,6 +12,7 @@ mod app;
 mod proxy_http;
 mod proxy_ws;
 mod subscribe;
+mod test;
 
 /// 密钥派生只需在冷启动时做一次，Isolate 存活期间复用。
 static STATE: OnceLock<DerivedKeys> = OnceLock::new();

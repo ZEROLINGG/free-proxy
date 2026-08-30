@@ -235,7 +235,7 @@ log = "debug"
             if consecutive >= 3 {
                 return Ok(());
             }
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_millis(300)).await;
         }
 
         bail!("Server launched but /health never became ready in time");
@@ -268,7 +268,7 @@ impl Client {
                     ca_dir: env::temp_dir().join("free-proxy.test"),
                     ca_key_secret: *b"0o9i8u7y6t5r3w3rj8wuhq6n26^8je(&",
                     compressor: ProxyCompressor::Lz4,
-                    aead: ProxyAead::Aes128Gcm,
+                    aead: ProxyAead::Ascon128,
                     pref_ip: None, // 本地测试无法启用
                 };
 

@@ -1,4 +1,4 @@
-use crate::aead::{Aes128Gcm, Cipher};
+use crate::aead::{Ascon128, Cipher};
 use crate::base::{Base91, Encoder};
 use crate::hash::{Blake3, Hasher};
 use crate::kdf::{HkdfSha256, Kdf, Pbkdf2HmacSha256};
@@ -20,7 +20,7 @@ pub fn token_auth(token_tmp: &str, token_base: &[u8; 16], now: u64) -> bool {
         Ok(data) => data,
         Err(_) => return false,
     };
-    let decrypted_payload = match Aes128Gcm::decrypt(encrypted_data, token_base.as_ref()) {
+    let decrypted_payload = match Ascon128::decrypt(encrypted_data, token_base.as_ref()) {
         Ok(data) => data,
         Err(_) => return false,
     };
@@ -43,7 +43,7 @@ pub fn token_gen(token_base: &[u8; 16], now: u64, nonce: u64) -> String {
     payload[0..8].copy_from_slice(&nonce.to_be_bytes());
     payload[8..16].copy_from_slice(&now.to_be_bytes());
 
-    match Aes128Gcm::encrypt(&payload, token_base.as_ref()) {
+    match Ascon128::encrypt(&payload, token_base.as_ref()) {
         Ok(encrypted) => Base91::encode(encrypted).unwrap_or_default(),
         Err(_) => String::new(),
     }

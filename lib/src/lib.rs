@@ -3,7 +3,6 @@ pub mod log;
 pub mod algo;
 pub mod base;
 pub mod compress;
-pub mod ecc;
 pub mod frames;
 pub mod hash;
 pub mod http;

@@ -19,8 +19,6 @@ use crate::app::{status_text, AppState};
 use crate::error;
 
 /// wasm 单线程场景下安全：绕过 axum/tower 对 Future: Send 的编译期要求。
-/// SAFETY: 仅可用于 Cloudflare Workers 这种单线程 Wasm 运行时，
-/// 若移植到多线程原生后端将引发数据竞争，禁止跨环境复用。
 struct SendStream<T>(T);
 unsafe impl<T> Send for SendStream<T> {}
 unsafe impl<T> Sync for SendStream<T> {}
@@ -298,75 +296,136 @@ pub(crate) async fn proxy(
     let aead = aead;
 
     let stream = async_stream::stream! {
-        let mut body_stream = body_stream;
+    let mut body_stream = body_stream;
 
-        // ---------- 1. status line + headers ----------
-        let body_allowed = !is_head && status != 204 && status != 304;
-        let use_chunked = body_allowed;
+    let mut content_length_zero = false;
+    let mut is_sse = false; // 用于判断是否为 Server-Sent Events
 
-        let mut head_buf = Vec::with_capacity(512);
-        let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));
-        for (k, v) in resp_headers.iter() {
-            if ["content-length", "transfer-encoding", "content-encoding"]
-                .iter()
-                .any(|&h| k.eq_ignore_ascii_case(h))
-            {
+    let mut head_buf = Vec::with_capacity(512);
+    let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));
+
+    for (k, v) in resp_headers.iter() {
+        if ["content-length", "transfer-encoding", "content-encoding"]
+            .iter()
+            .any(|&h| k.eq_ignore_ascii_case(h))
+        {
+            if k.eq_ignore_ascii_case("content-length") && v.trim() == "0" {
+                content_length_zero = true;
+            }
+            continue;
+        }
+        if k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream") {
+            is_sse = true;
+        }
+        let _ = write!(&mut head_buf, "{}: {}\r\n", k, v);
+    }
+
+    let is_informational = status >= 100 && status < 200;
+    let body_allowed = !is_head
+        && status != 204
+        && status != 304
+        && !is_informational
+        && !content_length_zero;
+
+    let use_chunked = body_allowed;
+
+    if use_chunked {
+        head_buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    }
+    head_buf.extend_from_slice(b"\r\n");
+
+    // 发送 Header 帧
+    match pack_frame(&head_buf, compressor, aead, &key16, &key32) {
+        Ok(frame) => yield Ok(Bytes::from(frame)),
+        Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
+    }
+
+    if body_allowed {
+        const BUFFER_THRESHOLD: usize = 16 * 1024;
+        let threshold = if is_sse { 0 } else { BUFFER_THRESHOLD };
+
+        let mut buffer = Vec::with_capacity(BUFFER_THRESHOLD);
+
+
+        let flush_buffer = |buf: &mut Vec<u8>| -> Result<Bytes, String> {
+            if buf.is_empty() {
+                return Ok(Bytes::new());
+            }
+            let framed = if use_chunked {
+                let mut chunk_buf = Vec::with_capacity(buf.len() + 20);
+                let _ = write!(&mut chunk_buf, "{:x}\r\n", buf.len());
+                chunk_buf.extend_from_slice(buf);
+                chunk_buf.extend_from_slice(b"\r\n");
+                chunk_buf
+            } else {
+                buf.clone()
+            };
+
+            buf.clear();
+
+            pack_frame(&framed, compressor, aead, &key16, &key32)
+                .map(Bytes::from)
+        };
+
+        loop {
+            let bytes = match body_stream.next().await {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => { yield Err(std::io::Error::other(format!("{e:?}"))); return; }
+                None => break, // EOF
+            };
+
+            if bytes.is_empty() {
                 continue;
             }
-            let _ = write!(&mut head_buf, "{}: {}\r\n", k, v);
-        }
-        if use_chunked {
-            head_buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-        }
-        head_buf.extend_from_slice(b"\r\n");
 
-        match pack_frame(&head_buf, compressor, aead, &key16, &key32) {
-            Ok(frame) => yield Ok(Bytes::from(frame)),
-            Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
-        }
-
-        // ---------- 2. body ----------
-        if !is_head {
-            loop {
-                let bytes = match body_stream.next().await {
-                    Some(Ok(b)) => b,
-                    Some(Err(e)) => { yield Err(std::io::Error::other(format!("{e:?}"))); return; }
-                    None => break,
-                };
-
-                if bytes.is_empty() {
-                    continue;
-                }
-
-                let framed: Vec<u8> = if use_chunked {
-                    // 容量计算：16字节(留给 hex length) + \r\n (2字节) + bytes大小 + \r\n (2字节) = 20字节
+            if buffer.is_empty() && bytes.len() >= threshold {
+                let framed = if use_chunked {
                     let mut chunk_buf = Vec::with_capacity(bytes.len() + 20);
                     let _ = write!(&mut chunk_buf, "{:x}\r\n", bytes.len());
                     chunk_buf.extend_from_slice(&bytes);
                     chunk_buf.extend_from_slice(b"\r\n");
                     chunk_buf
                 } else {
-                    bytes
+                    bytes.to_vec()
                 };
 
                 match pack_frame(&framed, compressor, aead, &key16, &key32) {
                     Ok(frame) => yield Ok(Bytes::from(frame)),
-                    Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
+                    Err(e) => { yield Err(std::io::Error::other(format!("pack error: {e}"))); return; }
                 }
+                continue;
             }
 
-            if use_chunked {
-                let tail = b"0\r\n\r\n";
-                match pack_frame(tail, compressor, aead, &key16, &key32) {
-                    Ok(frame) => yield Ok(Bytes::from(frame)),
-                    Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
+            buffer.extend_from_slice(&bytes);
+
+            if buffer.len() >= threshold {
+                match flush_buffer(&mut buffer) {
+                    Ok(bytes) if bytes.is_empty() => {},
+                    Ok(bytes) => yield Ok(bytes),
+                    Err(e) => { yield Err(std::io::Error::other(e)); return; }
                 }
             }
         }
 
-        // 零长帧 = EOS
-        yield Ok(Bytes::from(make_frame(b"")));
-    };
+        if !buffer.is_empty() {
+             match flush_buffer(&mut buffer) {
+                Ok(bytes) if !bytes.is_empty() => yield Ok(bytes),
+                Err(e) => { yield Err(std::io::Error::other(e)); return; }
+                _ => {}
+            }
+        }
+
+        if use_chunked {
+            let tail = b"0\r\n\r\n";
+            match pack_frame(tail, compressor, aead, &key16, &key32) {
+                Ok(frame) => yield Ok(Bytes::from(frame)),
+                Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
+            }
+        }
+    }
+
+    yield Ok(Bytes::from(make_frame(b"")));
+};
 
     let stream = SendStream(Box::pin(stream));
     let resp = Response::builder()

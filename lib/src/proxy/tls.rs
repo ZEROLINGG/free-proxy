@@ -24,7 +24,7 @@ use tokio::time::{Duration as TokioDuration, timeout};
 use tokio_rustls::LazyConfigAcceptor;
 use tokio_rustls::server::TlsStream;
 
-use crate::aead::{Aes256GcmSiv, Cipher};
+use crate::aead::{ChaCha20Poly1305, Cipher};
 
 /// 叶子证书缓存容量上限（moka 精确维护，非软上限）
 const LEAF_CACHE_MAX: u64 = 256;
@@ -227,7 +227,7 @@ fn generate_and_persist_ca(
     std::fs::write(cert_path, &cert_pem)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
 
-    let encrypted_key = Aes256GcmSiv::encrypt(
+    let encrypted_key = ChaCha20Poly1305::encrypt(
         issuer.key().serialize_pem().as_bytes(),
         key_secret,
     )
@@ -252,7 +252,7 @@ fn load_ca(cert_path: &Path, key_path: &Path, secret: &[u8; 32]) -> Result<Ca> {
     let encrypted_key = std::fs::read(key_path)
         .with_context(|| format!("failed to read {}", key_path.display()))?;
 
-    let key_pem_bytes = Aes256GcmSiv::decrypt(&encrypted_key, secret)
+    let key_pem_bytes = ChaCha20Poly1305::decrypt(&encrypted_key, secret)
         .context("failed to decrypt CA key")?;
     let key_pem = String::from_utf8(key_pem_bytes)
         .context("CA key is not valid UTF-8 after decryption")?;

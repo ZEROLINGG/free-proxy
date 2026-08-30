@@ -25,11 +25,10 @@ Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `
 ├── deny.toml                     # cargo-deny shared config (all 4 crates read it)
 ├── .github/workflows/release.yml # tag-triggered release CI (desktop + CLI + Worker zip; Android job commented out)
 ├── lib/src/                      # shared protocol core — compiles for native AND wasm32
-│   ├── aead.rs                   #   AEAD ciphers: AES-GCM/GCM-SIV, ChaCha20-Poly1305/XChaCha20
+│   ├── aead.rs                   #   AEAD ciphers: ChaCha20-Poly1305 / Ascon-AEAD128
 │   ├── algo.rs                   #   compressor × AEAD negotiation + URL contract /api/{version}/{target}
 │   ├── base.rs                   #   base encodings (base64 / z85 / base91)
 │   ├── compress.rs               #   zstd / gzip / lz4
-│   ├── ecc.rs                    #   ECDSA/ECDH (k256/p256/p384)
 │   ├── frames.rs                 #   binary frame stream: [u32 BE len | payload], zero-length frame = EOS
 │   ├── hash.rs                   #   sha1/sha2/blake3 wrappers
 │   ├── http.rs                   #   httparse header parsing + UrlBuilder (zero-copy)
@@ -133,11 +132,11 @@ Per-crate:
 
 1. **UX & Feature Changes:**
   - Modifying CLI arguments (`client_cli/src/main.rs` or `clap` structs).
-  - Adding/altering GUI pages or workflows in Tauri (`client_tauri/src`).
-  - Introducing new configuration fields in `settings.json` or changing the config logic.
+  - Proxy architecture change.
+  - Add new features.
   - Changing API endpoints, subscription logic, or supported proxy protocols.
 2. **Setup & Architecture Changes:**
-  - Modifying npm/Cargo commands in `package.json` or `Makefile`.
+  - Modifying npm/Cargo commands in `package.json`.
   - Changing default ports (e.g., Worker port 80, local proxy port 18081).
   - Adding a new directory or crate.
 3. **Large-scale Refactoring:** Any change touching >5 files or altering the core data flow.

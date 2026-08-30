@@ -14,13 +14,12 @@ mod body;
 mod client;
 mod connection;
 mod relay;
-mod tls;
+pub mod tls;
 mod ws;
 
 pub use client::{check_proxy_availability, ProxyCheck};
 pub use tls::TlsManager;
-pub use crate::algo::{ProxyAead, ProxyAlgo, ProxyCompressor};
-pub use crate::tool::{gen_auth_token, xoroshiro128};
+use crate::algo::{ProxyAead, ProxyAlgo, ProxyCompressor};
 
 use anyhow::{bail, ensure, Context, Result};
 use std::path::PathBuf;
@@ -129,7 +128,7 @@ impl Shared {
         *guard = ProxyAlgo::new(compressor, aead);
     }
 
-    /// 热切换 AEAD 加密算法（接受字符串，如 "aes128gcm" / "chacha20poly1305"）
+    /// 热切换 AEAD 加密算法（接受字符串，如 "chacha20poly1305" / "ascon128"）
     pub(crate) fn set_aead(&self, aead: &str) -> Result<()> {
         let aead: ProxyAead = aead
             .parse()
@@ -305,7 +304,7 @@ impl Proxy {
         self.shared.set_algo(compressor, aead);
     }
 
-    /// 热切换 AEAD 加密算法（接受字符串，如 "aes128gcm" / "chacha20poly1305"）
+    /// 热切换 AEAD 加密算法（接受字符串，如 "chacha20poly1305" / "ascon128"）
     pub fn set_aead(&self, aead: &str) -> Result<()> {
         self.shared.set_aead(aead)
     }

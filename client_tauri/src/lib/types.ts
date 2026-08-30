@@ -1,13 +1,6 @@
 export type Compressor = "zstd" | "gzip" | "lz4" | "none";
 
-export type Aead =
-  | "aes128gcm"
-  | "aes256gcm"
-  | "aes128gcmsiv"
-  | "aes256gcmsiv"
-  | "chacha20poly1305"
-  | "xchacha20poly1305"
-  | "ascon128";
+export type Aead = "chacha20poly1305" | "ascon128";
 
 export interface ProxySettings {
   domain: string;
@@ -99,12 +92,7 @@ export const COMPRESSORS: { value: Compressor; label: string }[] = [
 ];
 
 export const AEADS: { value: Aead; label: string }[] = [
-  { value: "aes128gcm", label: "AES-128-GCM" },
-  { value: "aes256gcm", label: "AES-256-GCM" },
-  { value: "aes128gcmsiv", label: "AES-128-GCM-SIV" },
-  { value: "aes256gcmsiv", label: "AES-256-GCM-SIV" },
   { value: "chacha20poly1305", label: "ChaCha20-Poly1305" },
-  { value: "xchacha20poly1305", label: "XChaCha20-Poly1305" },
   { value: "ascon128", label: "Ascon-AEAD128" },
 ];
 

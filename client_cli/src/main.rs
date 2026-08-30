@@ -57,7 +57,7 @@ struct RunArgs {
     /// 压缩算法(zstd / gzip / lz4 / none)
     #[arg(long)]
     compressor: Option<String>,
-    /// 加密算法(aes128gcm / aes256gcm / chacha20poly1305 / ...)
+    /// 加密算法(chacha20poly1305 / ascon128)
     #[arg(long)]
     aead: Option<String>,
     /// 优选 IP(如 104.16.39.227)

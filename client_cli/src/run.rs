@@ -41,7 +41,7 @@ async fn handle_stdin(line: &str, proxy: &Proxy) -> bool {
     match parts[0] {
         "algo" => {
             if parts.len() != 3 {
-                println!("用法: algo <压缩算法> <加密算法>   例如: algo zstd aes128gcm");
+                println!("用法: algo <压缩算法> <加密算法>   例如: algo zstd chacha20poly1305");
             } else {
                 let mut ok = true;
                 if let Err(e) = proxy.set_compressor(parts[1]) {
@@ -90,7 +90,7 @@ async fn handle_stdin(line: &str, proxy: &Proxy) -> bool {
 
 fn print_help() {
     println!("可用命令:");
-    println!("  algo <压缩> <加密>   热切换算法,如: algo zstd aes128gcm");
+    println!("  algo <压缩> <加密>   热切换算法,如: algo zstd ascon128");
     println!("  ip <IP|off>          热切换优选 IP,如: ip 104.16.39.227 / ip off");
     println!("  check                重新检测链路(出口 IP + 延迟)");
     println!("  stop / exit / quit   停止代理并退出");
