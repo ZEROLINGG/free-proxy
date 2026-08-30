@@ -206,7 +206,7 @@ where
         }
 
 
-        let keep_alive = handle_http_proxy(stream, &mut parser, &header, remaining, extent, is_https, &shared).await?;
+        let keep_alive = handle_http_proxy(&mut stream, &mut parser, &header, remaining, extent, is_https, &shared).await?;
 
         if !keep_alive {
             break;

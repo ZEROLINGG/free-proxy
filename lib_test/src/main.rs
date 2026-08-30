@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
         (chunked_up_256kb),
         (concurrent_mixed_24),
 
-        // ── 负向与gzip ──
+        // ── 负向与zstd ──
         (negative_unconnectable_502),
         (zstd_body),
     );

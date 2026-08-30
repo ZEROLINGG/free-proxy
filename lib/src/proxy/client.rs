@@ -99,43 +99,83 @@ pub async fn check_proxy_availability(port: u16) -> Result<ProxyCheck> {
 
 /// 主 HTTP/2 上游 client（worker_url 直连，无优选 IP 时使用）
 pub(super) fn build_main_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .no_proxy()
-        .pool_max_idle_per_host(512)
-        .pool_idle_timeout(Duration::from_secs(360))
-        .tcp_keepalive(Duration::from_secs(60))
-        .http2_initial_stream_window_size(2 * 1024 * 1024)
-        .http2_initial_connection_window_size(16 * 1024 * 1024)
-        .tcp_nodelay(true)
-        .build()
-        .context("failed to build http client")
+    #[cfg(not(feature = "http3"))]
+    {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .no_proxy()
+            .pool_max_idle_per_host(512)
+            .pool_idle_timeout(Duration::from_secs(360))
+            .tcp_keepalive(Duration::from_secs(60))
+            .http2_initial_stream_window_size(2 * 1024 * 1024)
+            .http2_initial_connection_window_size(16 * 1024 * 1024)
+            .tcp_nodelay(true)
+            .build()
+            .context("failed to build http client")
+    }
+    #[cfg(feature = "http3")]
+    {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .no_proxy()
+            .pool_max_idle_per_host(512)
+            .pool_idle_timeout(Duration::from_secs(360))
+            .http3_prior_knowledge()
+            .build()
+            .context("failed to build http3 main client")
+    }
 }
+
 
 /// 优选 IP 专用 client：配置 `.resolve(domain, ip:port)`（SNI/Host 仍是域名）。
 /// ip 为 None / 空串时返回 None（调用方回退到主 client 的 DNS 解析）。
 pub(super) fn build_pref_client(worker_url: &str, ip: Option<&str>) -> Result<Option<reqwest::Client>> {
-    let Some(ip) = ip.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let url = url_parse(worker_url)?;
-    let host = url.host.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
-    let port = url.port.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
-    let addr: IpAddr = ip
-        .parse()
-        .with_context(|| format!("invalid preferred ip: {ip:?}"))?;
-    let client = reqwest::Client::builder()
-        .resolve(&*host, SocketAddr::new(addr, port))
-        .connect_timeout(CONNECT_TIMEOUT)
-        .no_proxy()
-        .pool_max_idle_per_host(512)
-        .pool_idle_timeout(Duration::from_secs(360))
-        .tcp_keepalive(Duration::from_secs(60))
-        .http2_initial_stream_window_size(2 * 1024 * 1024)
-        .http2_initial_connection_window_size(16 * 1024 * 1024)
-        .tcp_nodelay(true)
-        .build()?;
-    Ok(Some(client))
+    #[cfg(not(feature = "http3"))]
+    {
+        let Some(ip) = ip.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let url = url_parse(worker_url)?;
+        let host = url.host.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
+        let port = url.port.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
+        let addr: IpAddr = ip
+            .parse()
+            .with_context(|| format!("invalid preferred ip: {ip:?}"))?;
+        let client = reqwest::Client::builder()
+            .resolve(&*host, SocketAddr::new(addr, port))
+            .connect_timeout(crate::proxy::client::CONNECT_TIMEOUT)
+            .no_proxy()
+            .pool_max_idle_per_host(512)
+            .pool_idle_timeout(Duration::from_secs(360))
+            .tcp_keepalive(Duration::from_secs(60))
+            .http2_initial_stream_window_size(2 * 1024 * 1024)
+            .http2_initial_connection_window_size(16 * 1024 * 1024)
+            .tcp_nodelay(true)
+            .build()?;
+        Ok(Some(client))
+    }
+    #[cfg(feature = "http3")]
+    {
+        let Some(ip) = ip.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let url = url_parse(worker_url)?;
+        let host = url.host.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
+        let port = url.port.ok_or_else(|| anyhow::anyhow!("invalid worker url: {worker_url:?}"))?;
+        let addr: IpAddr = ip
+            .parse()
+            .with_context(|| format!("invalid preferred ip: {ip:?}"))?;
+
+        let client = reqwest::Client::builder()
+            .resolve(&*host, SocketAddr::new(addr, port))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .no_proxy()
+            .pool_max_idle_per_host(512)
+            .pool_idle_timeout(Duration::from_secs(360))
+            .http3_prior_knowledge()
+            .build()?;
+        Ok(Some(client))
+    }
 }
 
 /// WebSocket 隧道专用 client：HTTP/1.1 才能完成 101 升级（h2 不支持），

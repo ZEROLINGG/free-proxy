@@ -110,7 +110,7 @@ async fn cookies() -> Response {
 
 
 async fn zstd() -> Response {
-    let mut data = *b"w7y37y7d37dguwnjicjoe0iw9uj8hg";
+    let mut data = *b"11223344556677889911223344556677889900000000000000000000000000000000000000000000000000";
     let mut resp = Body::from(Zstd::compress(data).unwrap()).into_response();
     resp.headers_mut()
         .insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));

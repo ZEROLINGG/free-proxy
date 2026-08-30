@@ -176,8 +176,7 @@ pub(crate) async fn proxy(
     }
     init.with_headers(fetch_headers);
 
-    // HEAD 必然无 body；其余方法（含带 body 的 GET）都保留 body，避免静默丢帧
-    if method != worker::Method::Head {
+    if method != worker::Method::Head && method != worker::Method::Get  {
         if buffer_mode {
             let expect = content_length.unwrap_or(0) as usize;
             let mut buf: Vec<u8> = Vec::with_capacity(expect);

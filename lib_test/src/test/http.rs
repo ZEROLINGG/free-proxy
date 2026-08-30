@@ -355,18 +355,13 @@ pub async fn zstd_body() -> Result<()> {
         .send()
         .await?
         .error_for_status()?;
-    let ce = resp
-        .headers()
-        .get("content-encoding")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    let headers = resp.headers().clone();
     let body = resp.bytes().await?;
 
-    // worker已经自动解压
-    let mut data = *b"w7y37y7d37dguwnjicjoe0iw9uj8hg";
+    let mut data = *b"11223344556677889911223344556677889900000000000000000000000000000000000000000000000000";
     ensure!(
         body.as_ref() == data.as_slice(),
-        "Abnormal response {:?}", ce
+        "Abnormal response body: {:?} headers: {:?}", body, headers
     );
     Ok(())
 }
