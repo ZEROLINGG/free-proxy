@@ -188,7 +188,9 @@ impl WebServer {
             let _ = tx.send(());
         }
 
-        if let Some(handle) = self.server_task.lock().expect("").take() {
+        // 先取出句柄再 await，避免 MutexGuard 跨 await 持有
+        let handle = self.server_task.lock().expect("").take();
+        if let Some(handle) = handle {
             handle.await??;
         }
 

@@ -216,7 +216,8 @@ pub fn open_ca_dir<R: Runtime>(app: AppHandle<R>) -> Result<()> {
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        todo!()
+        // 移动端无文件管理器入口，前端本应隐藏该按钮；此兜底避免误触发 panic
+        return Err("移动端不支持打开 CA 目录".into());
     }
 
     Ok(())

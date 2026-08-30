@@ -66,8 +66,9 @@ pub(crate) fn router(state: AppState) -> Router {
             auth_middleware,
         ))
         .with_state(state)
+        // 刻意注册在鉴权 layer 之后：订阅客户端（Clash/sing-box）无法携带 Bearer token
         .route("/subscribe/{port}", get(subscribe))
-        .fallback(|| async { "not found" })
+        .fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
 }
 
 /// HTTP 状态码 -> Reason Phrase，proxy_http / proxy_ws 共用。

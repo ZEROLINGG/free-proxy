@@ -151,7 +151,7 @@ pub(crate) async fn proxy(
         "PATCH" => worker::Method::Patch,
         "HEAD" => worker::Method::Head,
         "OPTIONS" => worker::Method::Options,
-        _ => worker::Method::Get,
+        other => return Err(error!(METHOD_NOT_ALLOWED, "unsupported method: {other}")),
     };
     init.with_method(method.clone());
     init.with_redirect(worker::RequestRedirect::Manual);
@@ -176,7 +176,8 @@ pub(crate) async fn proxy(
     }
     init.with_headers(fetch_headers);
 
-    if method != worker::Method::Get && method != worker::Method::Head {
+    // HEAD 必然无 body；其余方法（含带 body 的 GET）都保留 body，避免静默丢帧
+    if method != worker::Method::Head {
         if buffer_mode {
             let expect = content_length.unwrap_or(0) as usize;
             let mut buf: Vec<u8> = Vec::with_capacity(expect);
