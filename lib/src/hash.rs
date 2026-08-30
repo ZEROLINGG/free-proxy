@@ -31,20 +31,7 @@ impl_hasher!(Sha256, sha2::Sha256);
 pub struct Sha512;
 impl_hasher!(Sha512, sha2::Sha512);
 
-pub struct Sha512_256;
-impl_hasher!(Sha512_256, sha2::Sha512_256);
 
-// ====== Blake3 实现 ======
-pub struct Blake3;
-impl Hasher for Blake3 {
-    fn digest_vec<T: AsRef<[u8]>>(input: T) -> Vec<u8> {
-        blake3::hash(input.as_ref()).as_bytes().to_vec()
-    }
-
-    fn digest_hex<T: AsRef<[u8]>>(input: T) -> String {
-        blake3::hash(input.as_ref()).to_hex().to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -93,15 +80,7 @@ mod tests {
         run_all_generic_tests::<Sha512>("sha512");
     }
 
-    #[test]
-    fn test_sha512_256() {
-        run_all_generic_tests::<Sha512_256>("sha512_256");
-    }
 
-    #[test]
-    fn test_blake3() {
-        run_all_generic_tests::<Blake3>("blake3");
-    }
 
     #[test]
     fn test_known_sha1_vector() {
@@ -120,9 +99,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_known_blake3_vector() {
-        let vec = Blake3::digest_vec(b"abc");
-        assert_eq!(vec.len(), 32);
-    }
+
 }

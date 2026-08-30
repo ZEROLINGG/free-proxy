@@ -1,42 +1,56 @@
+// lib/src/proxy/core/ws.rs
 
-use anyhow::{Context, Result, bail};
+
+
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{CloseCode, Message, Upgrade};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf};
+use tokio::sync::mpsc;
+use tokio::task::JoinError;
 use crate::algo::{ProxyAlgo, decode_chunk, encode_chunk};
 use crate::http::ReqHeader;
 use crate::proxy::connection::IDLE_TIMEOUT;
-use crate::proxy::core::{read_raw, RawRead};
 use crate::tool::gen_auth_token;
 use crate::ws::{WsCache, WsData, WsFrame, WsTunnelMsg};
 
 use super::Shared;
 
 const TUNNEL_PING_INTERVAL: Duration = Duration::from_secs(60);
-
-
+/// 每轮读取前保证至少剩余这么多可写容量：既避免 read_buf 在零容量时返回
+/// Ok(0) 被误判为 EOF，也以较大块读取减少系统调用次数。
+const READ_CHUNK: usize = 64 * 1024;
+/// 控制帧（pong / close / 错误页）有界通道容量：体积小、频率低，32 足够。
+const CTRL_CHANNEL_CAP: usize = 32;
+/// 业务下行数据有界通道容量：writer 来不及写时提供缓冲，形成自然的 TCP 背压。
+const DATA_CHANNEL_CAP: usize = 64;
 
 /// 浏览器 WS 升级请求 → worker WS 隧道全生命周期。
 ///
 /// `header` 为浏览器原始升级请求，`remaining` 为其后同包到达的超读字节
 /// （可能已含首批 WS 帧），`is_https` 决定头帧末尾的 wss 标志位。
+///
+/// `stream` 按值传入（而非 `&mut S`）：upload / download / writer 被拆分为
+/// 三个 `tokio::spawn` 任务以获得真正的并行调度，这要求 S 满足 Send + 'static。
+/// 线路协议（HTTP 头帧、WS 帧格式、加密/压缩管线）完全不变。
 pub(crate) async fn handle_ws_proxy<S>(
-    stream: &mut S,
+    stream: S,
     header: &ReqHeader,
     remaining: BytesMut,
     is_https: bool,
     shared: &Arc<Shared>,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let algo = shared.algo();
     let key16 = shared.key16;
     let key32 = shared.key32;
+
+    let mut stream = stream;
 
     // ---------- 头帧：浏览器原始请求 + 末尾 wss 标志（与 HTTP 路径同款） ----------
     let mut head_frame = BytesMut::with_capacity(header.raw.len() + 1);
@@ -79,9 +93,9 @@ where
         }
     };
 
-    // ---------- 首消息：头帧 ----------
+    // ---------- 首消息：头帧（BytesMut::to_vec 免去 freeze 中间态） ----------
     ws.send(Message::Binary(tunnel_payload(
-        &WsTunnelMsg::HeadFrame(head_frame.freeze().to_vec()),
+        &WsTunnelMsg::HeadFrame(head_frame.to_vec()),
         algo,
         &key16,
         &key32,
@@ -89,19 +103,38 @@ where
         .await
         .context("send ws head frame failed")?;
 
-    // ---------- 拆分 TCP 读写半 + WS 收发半，双任务并发 ----------
+    // ---------- 拆分 TCP 读写半 + WS 收发半 ----------
     let (mut rd, wr) = split(stream);
-    let wr = Arc::new(Mutex::new(wr));
-    let wr_upload = Arc::clone(&wr);
-    let wr_download = Arc::clone(&wr);
     let (mut ws_tx, mut ws_rx) = ws.split();
 
+    // ---------- 写侧改为 单写协程 + 双优先级有界 channel ----------
+    // upload / download 不再直接持锁写 TCP，而是把待写字节丢进 channel，
+    // 由唯一 writer 串行落盘。控制帧（pong/close/错误页）走 ctrl（高优先），
+    // 业务下行走 data（低优先），writer 内 biased select 保证控制帧优先出队，
+    // 从根上消除此前 Arc<Mutex<WriteHalf>> 的锁竞争与优先级反转。
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<Bytes>(CTRL_CHANNEL_CAP);
+    let (data_tx, data_rx) = mpsc::channel::<Bytes>(DATA_CHANNEL_CAP);
+
+    let mut writer_handle = tokio::spawn(run_writer(wr, ctrl_rx, data_rx));
+
+    let upload_ctrl = ctrl_tx.clone();
+    let download_ctrl = ctrl_tx.clone();
+    drop(ctrl_tx); // 父协程不再持有 sender；writer 依赖两侧 sender 全部 drop 后自然收尾
+
     // [A] 上行：浏览器帧流 → 语义化 WsTunnelMsg
-    let upload = async move {
+    let mut upload_handle = tokio::spawn(async move {
         let mut buf = BytesMut::from(remaining);
         let mut cache = WsCache::new();
 
+        // 心跳用固定节拍 interval：不因数据活跃而被无限期推迟（修复 sleep 每次
+        // 重建导致的心跳饥饿），Delay 模式保证错过拍的 tick 立即补发。
+        let mut ping_interval = tokio::time::interval(TUNNEL_PING_INTERVAL);
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping_interval.tick().await; // 消费首个立即触发的 tick
+
         loop {
+            let mut needs_flush = false;
+
             // 先榨干缓冲中的完整帧（不 await，避免 select 分支内的重入）
             loop {
                 let Some((frame, consumed)) = WsFrame::parse(&buf)? else {
@@ -111,13 +144,10 @@ where
 
                 if frame.is_ping() {
                     let pong = WsFrame::new_pong(frame.payload.clone(), None);
-
-                    // 将 Mutex 锁的使用限定在最小块级作用域中。
-                    // 锁被丢弃后，才能执行后续的 ws_tx.send().await 操作，彻底切断反压循环死锁。
-                    {
-                        let mut w = wr_upload.lock().await;
-                        w.write_all(&pong.to_bytes()).await?;
-                    }
+                    upload_ctrl
+                        .send(Bytes::from(pong.to_bytes()))
+                        .await
+                        .map_err(|_| anyhow!("writer channel closed"))?;
 
                     let payload = tunnel_payload(
                         &WsTunnelMsg::Ping(frame.payload.clone()),
@@ -125,18 +155,19 @@ where
                         &key16,
                         &key32,
                     )?;
-                    ws_tx.send(Message::Binary(payload)).await?;
+                    // feed 暂存、循环末统一 flush，减少 WS 隧道上的小包 syscall
+                    ws_tx.feed(Message::Binary(payload)).await?;
+                    needs_flush = true;
 
                 } else if frame.is_pong() {
                     // 浏览器应答我们的保活 Ping，忽略
                 } else if frame.is_close() {
                     let close_info = frame.close_info();
                     let resp = WsFrame::new_close(close_info.clone(), None);
-
-                    {
-                        let mut w = wr_upload.lock().await;
-                        w.write_all(&resp.to_bytes()).await?;
-                    }
+                    upload_ctrl
+                        .send(Bytes::from(resp.to_bytes()))
+                        .await
+                        .map_err(|_| anyhow!("writer channel closed"))?;
 
                     let payload = tunnel_payload(
                         &WsTunnelMsg::Close(close_info),
@@ -156,26 +187,54 @@ where
                     match cache.try_pop()? {
                         Some(WsData::Text(text)) => {
                             let payload = tunnel_payload(&WsTunnelMsg::Text(text), algo, &key16, &key32)?;
-                            ws_tx.send(Message::Binary(payload)).await?;
+                            ws_tx.feed(Message::Binary(payload)).await?;
+                            needs_flush = true;
                         }
                         Some(WsData::Binary(bin)) => {
                             let payload = tunnel_payload(&WsTunnelMsg::Binary(bin), algo, &key16, &key32)?;
-                            ws_tx.send(Message::Binary(payload)).await?;
+                            ws_tx.feed(Message::Binary(payload)).await?;
+                            needs_flush = true;
                         }
                         None => {}
                     }
                 }
             }
 
+            if needs_flush {
+                ws_tx.flush().await?;
+            }
+
+            // 保证 read_buf 有足够剩余可写容量：
+            // 1) 容量将尽时 reserve，避免 read_buf 在零剩余容量下返回 Ok(0) 被误判为 EOF；
+            // 2) 尽量大块读取，减少系统调用。
+            if buf.capacity() - buf.len() < READ_CHUNK / 4 {
+                buf.reserve(READ_CHUNK);
+            }
+
             tokio::select! {
-                _ = tokio::time::sleep(TUNNEL_PING_INTERVAL) => {
+                _ = ping_interval.tick() => {
                     ws_tx.send(Message::Ping(Bytes::new())).await?;
                 }
-                r = read_raw(&mut rd, IDLE_TIMEOUT) => {
-                    match r? {
-                        RawRead::Data(data) => buf.extend_from_slice(&data),
-                        RawRead::Eof | RawRead::TimedOut => {
-                            // 浏览器侧断开/假死：通知 worker 后结束
+                r = tokio::time::timeout(IDLE_TIMEOUT, rd.read_buf(&mut buf)) => {
+                    // read_buf 已内部推进游标（len == 读取字节数），此处 zero-op，
+                    // 绝不手动 advance_mut——双重推进会外泄未初始化字节。
+                    match r {
+                        Ok(Ok(n)) if n > 0 => {}
+                        Ok(Ok(_)) => {
+                            // EOF：浏览器侧断开，通知 worker 后结束
+                            ws_tx
+                                .send(Message::Close {
+                                    code: CloseCode::Iana(1000),
+                                    reason: String::new(),
+                                })
+                                .await?;
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                        Ok(Err(e)) => {
+                            return Err(anyhow::Error::new(e).context("read failed"));
+                        }
+                        Err(_) => {
+                            // 假死：浏览器侧超时，通知 worker 后结束
                             ws_tx
                                 .send(Message::Close {
                                     code: CloseCode::Iana(1000),
@@ -188,10 +247,10 @@ where
                 }
             }
         }
-    };
+    });
 
-    // [B] 下行：worker 的 Return 原始字节 / Error 错误反馈 → 直写 TCP
-    let download = async move {
+    // [B] 下行：worker 的 Return 原始字节 / Error 错误反馈 → 经 channel 交给 writer
+    let mut download_handle = tokio::spawn(async move {
         // 用于追踪是否已经给浏览器转发过 101 升级响应
         let mut has_upgraded = false;
 
@@ -204,32 +263,33 @@ where
                         .context("deserialize tunnel message failed")?;
 
                     match tunnel {
-                        // 101 响应头 / 数据帧 / close 帧：零解析直写
+                        // 101 响应头 / 数据帧 / close 帧：零解析直写（走 data 通道）
                         WsTunnelMsg::Return(raw) => {
                             has_upgraded = true;
-                            // 注意：这里的 write_all.await 即使持有锁阻塞也没关系，
-                            // 因为只有当浏览器读取缓冲满时它才会阻塞，这属于正常的反压(Backpressure)，不构成死锁环。
-                            let mut w = wr_download.lock().await;
-                            w.write_all(&raw).await?;
+                            data_tx
+                                .send(Bytes::from(raw))
+                                .await
+                                .map_err(|_| anyhow!("writer channel closed"))?;
                         }
                         // 服务端明确抛出的内部错误
                         WsTunnelMsg::Error(err_msg) => {
                             crate::error!("received explicit error from worker: {err_msg}");
-                            let mut w = wr_download.lock().await;
 
+                            // 错误反馈走 ctrl 通道，确保优先于积压业务数据写出
                             if has_upgraded {
-                                // 如果已经建立了 WS 连接，发送标准的 WS Close 帧通知浏览器
+                                // 已建立 WS 连接：发送标准 WS Close 帧通知浏览器
                                 // 1011: Internal Server Error
-                                let close_frame = WsFrame::new_close(Some((1011, Some(err_msg.clone()))), None);
-                                let _ = w.write_all(&close_frame.to_bytes()).await;
+                                let close_frame =
+                                    WsFrame::new_close(Some((1011, Some(err_msg.clone()))), None);
+                                let _ = download_ctrl.send(Bytes::from(close_frame.to_bytes())).await;
                             } else {
-                                // 如果还没升级成功，说明请求直接在 Worker 内失败了。
-                                // 需要返回 HTTP 错误，否则浏览器会卡死或者报 WS 协议违规
+                                // 尚未升级成功：请求在 Worker 内直接失败，返回 HTTP 错误
+                                // （否则浏览器会卡死或者报 WS 协议违规）
                                 let resp = format!(
                                     "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nProxy WS Error: {}\n",
                                     err_msg
                                 );
-                                let _ = w.write_all(resp.as_bytes()).await;
+                                let _ = download_ctrl.send(Bytes::from(resp.into_bytes())).await;
                             }
                             bail!("Worker upstream failed: {}", err_msg);
                         }
@@ -247,24 +307,95 @@ where
             }
         }
         Ok::<(), anyhow::Error>(())
-    };
+    });
 
-    // 当任意一端（如断网、被服务端踢出、读取超时）正常退出或报错时，
-    // select! 机制会自动 Drop 另一个未完成的任务，从而关闭底层的 TCP 连接，避免内存泄漏与僵尸进程。
+    // ---------- 收尾：谁先结束，谁触发另一方取消，writer 最后排空善后 ----------
+    // upload / download 任一方向结束后，先 abort 另一方向（其持有的 sender 随任务
+    // 结束被 drop）；随后不直接 abort writer，而是 await 它把队列中已入队但尚未
+    // 落盘的字节（close 帧 / 错误页）写完再自然退出，避免"半截关闭"丢字节。
+    let which;
     tokio::select! {
-        res = upload => {
-            if let Err(e) = res {
-                crate::warn!("upload terminated with error: {e:#}");
-            }
+        res = &mut writer_handle => {
+            which = "writer";
+            log_task_result("writer", res);
+            upload_handle.abort();
+            download_handle.abort();
         }
-        res = download => {
-            if let Err(e) = res {
-                crate::warn!("download terminated with error: {e:#}");
+        res = &mut upload_handle => {
+            which = "upload";
+            log_task_result("upload", res);
+            download_handle.abort();
+        }
+        res = &mut download_handle => {
+            which = "download";
+            log_task_result("download", res);
+            upload_handle.abort();
+        }
+    }
+
+    if which != "upload" {
+        log_task_result("upload", upload_handle.await);
+    }
+    if which != "download" {
+        log_task_result("download", download_handle.await);
+    }
+    if which != "writer" {
+        // upload / download 均已结束（正常或被取消），各自持有的 sender 全部 drop，
+        // 两个 channel 关闭，writer 排空队列后自然返回；此处 await 把善后字节落盘。
+        log_task_result("writer", writer_handle.await);
+    }
+
+    Ok(())
+}
+
+/// 唯一的浏览器侧写协程：从高优先级 ctrl 与低优先级 data 通道取出待写字节并落盘。
+/// `biased` select 保证控制帧（pong / close / 错误页）优先出队，从根上消除此前
+/// Arc<Mutex<WriteHalf>> 下"大数据写入长期持锁、小而急的控制帧被无限期阻塞"的
+/// 优先级反转。两个通道的 sender 全部 drop 后，writer 排空已入队字节并自然退出。
+async fn run_writer<W>(
+    mut wr: WriteHalf<W>,
+    mut ctrl_rx: mpsc::Receiver<Bytes>,
+    mut data_rx: mpsc::Receiver<Bytes>,
+) -> Result<()>
+where
+    W: AsyncWrite + Send + 'static,
+{
+    let mut ctrl_open = true;
+    let mut data_open = true;
+
+    loop {
+        if !ctrl_open && !data_open {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+            maybe = ctrl_rx.recv(), if ctrl_open => {
+                match maybe {
+                    Some(bytes) => wr.write_all(&bytes).await.context("write ctrl frame to browser failed")?,
+                    None => ctrl_open = false,
+                }
+            }
+            maybe = data_rx.recv(), if data_open => {
+                match maybe {
+                    Some(bytes) => wr.write_all(&bytes).await.context("write data frame to browser failed")?,
+                    None => data_open = false,
+                }
             }
         }
     }
 
     Ok(())
+}
+
+fn log_task_result(name: &str, res: std::result::Result<Result<()>, JoinError>) {
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => crate::warn!("{name} task terminated with error: {e:#}"),
+        Err(e) if e.is_cancelled() => {
+        }
+        Err(e) => crate::warn!("{name} task panicked: {e:#}"),
+    }
 }
 
 /// 序列化 + 压缩加密为隧道消息负载

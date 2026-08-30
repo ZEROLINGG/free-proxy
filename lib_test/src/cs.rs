@@ -267,8 +267,8 @@ impl Client {
                     auth_key: key.into(),
                     ca_dir: env::temp_dir().join("free-proxy.test"),
                     ca_key_secret: *b"0o9i8u7y6t5r3w3rj8wuhq6n26^8je(&",
-                    compressor: ProxyCompressor::Lz4,
-                    aead: ProxyAead::Ascon128,
+                    compressor: ProxyCompressor::default(),
+                    aead: ProxyAead::default(),
                     pref_ip: None, // 本地测试无法启用
                 };
 

@@ -20,31 +20,7 @@ impl Encoder for Base64 {
     }
 }
 
-pub struct Base85;
 
-impl Encoder for Base85 {
-    fn encode<T: AsRef<[u8]>>(input: T) -> Result<String> {
-        Ok(z85::encode(input.as_ref()))
-    }
-
-    fn decode(input: &str) -> Result<Vec<u8>> {
-        z85::decode(input).map_err(|e| anyhow::anyhow!("ascii85 decode error: {:?}", e))
-    }
-}
-
-pub struct Base91;
-
-impl Encoder for Base91 {
-    fn encode<T: AsRef<[u8]>>(input: T) -> Result<String> {
-        let encoded_bytes = base91::slice_encode(input.as_ref());
-        Ok(String::from_utf8(encoded_bytes).context("invalid utf8 in base91 encoding")?)
-    }
-
-    fn decode(input: &str) -> Result<Vec<u8>> {
-        let decoded_bytes = base91::slice_decode(input.as_bytes());
-        Ok(decoded_bytes)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -70,7 +46,5 @@ mod tests {
     #[test]
     fn test_all_round_trips() {
         round_trip::<Base64>("base64");
-        round_trip::<Base85>("base85");
-        round_trip::<Base91>("base91");
     }
 }

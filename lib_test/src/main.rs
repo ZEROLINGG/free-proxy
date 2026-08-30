@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
         // ── 负向与gzip ──
         (negative_unconnectable_502),
-        (gzip_body),
+        (zstd_body),
     );
 
     let ok = print_report(results);

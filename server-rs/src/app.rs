@@ -54,7 +54,6 @@ pub(crate) async fn auth_middleware(
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(|| async { "Hello, World!" }))
         .route(
             "/health",
             get(|| async { Date::now().as_millis().to_string() }),

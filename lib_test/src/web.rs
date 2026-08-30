@@ -15,7 +15,8 @@ use axum::Router;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use lib::compress::{Compressor, Gzip};
+use lib::compress::{Compressor, Zstd};
+use lib::hash::{Hasher, Sha256};
 use crate::util;
 
 /// 流式下载的单块大小（决定 worker 响应侧的帧数量）
@@ -40,7 +41,7 @@ async fn echo(req: Request) -> String {
 
 /// 接收整个 body，返回 `len=<n>;blake3=<hex>`（校验端比对用）
 async fn upload(body: Bytes) -> String {
-    format!("len={};blake3={}", body.len(), util::blake3_hex(&body))
+    format!("len={};blake3={}", body.len(), Sha256::digest_hex(&body))
 }
 
 /// 确定性模式数据的流式下载：多块传输以覆盖响应侧重分帧路径
@@ -108,13 +109,11 @@ async fn cookies() -> Response {
 }
 
 
-async fn gzip() -> Response {
-    // gzip magic(1f 8b) + 可辨识明文标记
-    let mut data = vec![0x1f, 0x8b];
-    data.extend_from_slice(b"GZIP-MARKER-PAYLOAD");
-    let mut resp = Body::from(Gzip::compress(data).unwrap()).into_response();
+async fn zstd() -> Response {
+    let mut data = *b"w7y37y7d37dguwnjicjoe0iw9uj8hg";
+    let mut resp = Body::from(Zstd::compress(data).unwrap()).into_response();
     resp.headers_mut()
-        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
     resp
 }
 
@@ -162,7 +161,7 @@ impl WebServer {
             .route("/redirect/{n}", get(redirect))
             .route("/redirect-done", get(redirect_done))
             .route("/cookies", get(cookies))
-            .route("/gzip", get(gzip))
+            .route("/zstd", get(zstd))
             .layer(axum::extract::DefaultBodyLimit::disable())
             .layer(middleware::from_fn(print_request_middleware));
 

@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, timeout_at, Duration, Instant};
 
-use crate::http::{split_host_port, HeaderPaser, ReqHeader};
+use crate::http::{split_host_port, HeaderParser, ReqHeader};
 use crate::proxy::body::body_extent;
 use crate::proxy::core::{http::handle_http_proxy, ws::handle_ws_proxy};
 use super::Shared;
@@ -25,7 +25,7 @@ const READ_BUF: usize = 16 * 1024;
 /// 连接入口：读首个请求头，按是否 CONNECT 决定本地 TLS(MITM) 握手，
 /// 之后统一进入 keep-alive 转发循环（泛型单态化：TcpStream / TlsStream<TcpStream>）。
 pub(super) async fn handle_connection(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
-    let mut parser = HeaderPaser::new();
+    let mut parser = HeaderParser::new();
     let deadline = Instant::now() + FIRST_REQUEST_TIMEOUT;
     let (header, remaining) = match read_next_header(&mut socket, &mut parser, deadline).await? {
         HeadOutcome::Head(h, r) => (h, r),
@@ -62,7 +62,7 @@ pub(super) async fn handle_connection(mut socket: TcpStream, shared: Arc<Shared>
                 .context("TLS handshake failed")?;
 
             // 隧道内重新解析真实请求头（与 TCP 阶段的 over-read 无关）
-            let mut tls_parser = HeaderPaser::new();
+            let mut tls_parser = HeaderParser::new();
             let deadline = Instant::now() + FIRST_REQUEST_TIMEOUT;
             let (h2, r2) = match read_next_header(&mut tls_stream, &mut tls_parser, deadline).await? {
                 HeadOutcome::Head(h, r) => (h, r),
@@ -72,14 +72,14 @@ pub(super) async fn handle_connection(mut socket: TcpStream, shared: Arc<Shared>
 
             // wss://：隧道内是 MITM 解密后的明文升级请求，wss 标志位 = 1
             if h2.is_websocket_upgrade() {
-                handle_ws_proxy(&mut tls_stream, &h2, r2, true, &shared).await?;
+                handle_ws_proxy(tls_stream, &h2, r2, true, &shared).await?;
                 return Ok(());
             }
 
             serve(tls_stream, tls_parser, h2, r2, true, shared).await
         } else {
             // ws://（Chrome 明文隧道）：直接解析 WS 升级请求，wss 标志位 = 0
-            let mut plain_parser = HeaderPaser::new();
+            let mut plain_parser = HeaderParser::new();
             let deadline = Instant::now() + FIRST_REQUEST_TIMEOUT;
             let (h2, r2) = match read_next_header(&mut socket, &mut plain_parser, deadline).await? {
                 HeadOutcome::Head(h, r) => (h, r),
@@ -91,7 +91,7 @@ pub(super) async fn handle_connection(mut socket: TcpStream, shared: Arc<Shared>
                 "plain CONNECT tunnel expected websocket upgrade, got {:?}",
                 h2.path
             );
-            handle_ws_proxy(&mut socket, &h2, r2, false, &shared).await?;
+            handle_ws_proxy(socket, &h2, r2, false, &shared).await?;
             Ok(())
         }
     } else {
@@ -137,7 +137,7 @@ pub(super) enum HeadOutcome {
 /// 对端正常关闭连接，或者到达 deadline。
 pub(super) async fn read_next_header<S>(
     stream: &mut S,
-    parser: &mut HeaderPaser,
+    parser: &mut HeaderParser,
     deadline: Instant,
 ) -> Result<HeadOutcome>
 where
@@ -147,9 +147,9 @@ where
         return Ok(HeadOutcome::Head(head, remaining));
     }
 
+    let mut buf = BytesMut::with_capacity(READ_BUF);
     loop {
-        let mut buf = [0u8; READ_BUF];
-        let n = match timeout_at(deadline, stream.read(&mut buf)).await {
+        let n = match timeout_at(deadline, stream.read_buf(&mut buf)).await {
             Ok(Ok(n)) => n,
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Ok(HeadOutcome::Closed);
@@ -160,10 +160,11 @@ where
         if n == 0 {
             return Ok(HeadOutcome::Closed);
         }
-        parser.push(&buf[..n])?;
+        parser.push(&buf)?;
         if let Some((head, remaining)) = parser.try_pop()? {
             return Ok(HeadOutcome::Head(head, remaining));
         }
+        buf.clear();
     }
 }
 
@@ -173,21 +174,39 @@ where
 /// 隧道内 HTTPS 用 TlsStream 单态化另一份。CONNECT 不可能在此出现。
 pub(super) async fn serve<S>(
     mut stream: S,
-    mut parser: HeaderPaser,
+    mut parser: HeaderParser,
     mut header: ReqHeader,
     mut remaining: BytesMut,
     is_https: bool,
     shared: Arc<Shared>,
 ) -> Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     loop {
-        if header.is_connect() {
-            bail!("unexpected CONNECT within an established stream");
+        let extent = body_extent(&header.headers)?;
+
+        crate::debug!(
+            "{:<7} {:<15.30} {:<15.30} {:?} {:.64?}",
+            header.method,
+            header
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("HOST"))
+                .map(|(_, v)| v)
+                .unwrap_or(&"unknown".to_string()),
+            header.path,
+            extent,
+            format!("{:?}", header.headers)
+        );
+
+        if header.is_websocket_upgrade() {
+            handle_ws_proxy(stream, &header, remaining, is_https, &shared).await?;
+            return Ok(());
         }
 
-        let keep_alive = handle_one_request(&mut stream, &mut parser, &header, remaining, is_https, &shared).await?;
+
+        let keep_alive = handle_http_proxy(stream, &mut parser, &header, remaining, extent, is_https, &shared).await?;
 
         if !keep_alive {
             break;
@@ -206,58 +225,5 @@ where
     let _ = stream.shutdown().await;
     Ok(())
 }
-
-
-// ─── 单请求转发 ──────────────────────────────────────────────────────────────
-
-/// 转发单个请求：按 HTTP 语义判定请求体范围，读完浏览器请求体后立即以
-/// EOS 完成 worker 请求体，再等待响应并回传。
-/// Cloudflare edge 在请求体未完成前不会交付响应，因此不能"等响应再 EOS"。
-///   - 上行：头帧（raw + https 标志）→ body 帧（头部超读字节 + 浏览器流）→ EOS；
-///   - 请求体边界：Content-Length 按计数、chunked 按四态解码（只转发 chunk 数据
-///     负载，剥离分帧字节），无 body 请求立即 EOS；超读字节中不属于 body 的部分
-///     归还 parser（keep-alive 流水线）；浏览器中途 EOF 照发 EOS（截断，worker 侧报错）；
-///   - 下行：响应帧流解包写回浏览器。
-///
-/// 返回是否可复用连接（keep-alive）：relay 成功且客户端未断开即可复用。
-/// 处理单个请求：解析 Body 范围，记录日志，并根据请求类型路由到 WS 隧道或标准 HTTP 转发。
-async fn handle_one_request<S>(
-    stream: &mut S,
-    parser: &mut HeaderPaser,
-    header: &ReqHeader,
-    remaining: BytesMut,
-    is_https: bool,
-    shared: &Arc<Shared>,
-) -> Result<bool>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    // ---------- 请求体范围判定 ----------
-    let extent = body_extent(&header.headers)?;
-
-    crate::debug!(
-        "{:<7} {:<15.30} {:<15.30} {:?} {:.64?}",
-        header.method,
-        header
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("HOST"))
-            .map(|(_, v)| v)
-            .unwrap_or(&"unknown".to_string()),
-        header.path,
-        extent,
-        format!("{:?}", header.headers)
-    );
-
-    // ---------- WebSocket 升级请求：转入 WS 隧道，连接不再复用 ----------
-    if header.is_websocket_upgrade() {
-        handle_ws_proxy(stream, header, remaining, is_https, shared).await?;
-        return Ok(false);
-    }
-
-    // ---------- 标准 HTTP 转发 ----------
-    handle_http_proxy(stream, parser, header, remaining, extent, is_https, shared).await
-}
-
 
 

@@ -5,7 +5,6 @@
 // 因此集中放在本模块，杜绝两端实现漂移。
 
 use anyhow::Result;
-use lib::hash::{Blake3, Hasher};
 
 /// 位置派生字节：给定流内偏移 pos 返回确定的字节值。
 /// 故意选用带位混淆的整数散列，使输出近似随机（不可压缩、
@@ -32,10 +31,6 @@ pub fn pattern_bytes(size: usize) -> Vec<u8> {
     v
 }
 
-/// Blake3 hex 摘要（复用 lib::hash 包装）
-pub fn blake3_hex(data: &[u8]) -> String {
-    Blake3::digest_hex(data)
-}
 
 /// 校验「长度 + blake3」回显串（web.rs /upload 的返回格式）：
 /// 格式 `len=<n>;blake3=<hex>`

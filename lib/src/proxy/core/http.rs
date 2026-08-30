@@ -1,28 +1,26 @@
-
-
-use anyhow::{Context, Result, bail, anyhow};
+use crate::algo::{ProxyAlgo, decode_chunk};
+use crate::frames::{Frame, FrameCache, enc_frame, make_frame};
+use crate::http::{HeaderParser, ReqHeader, UrlBuilder};
+use crate::proxy::body::{BodyExtent, PumpTracker, split_body_prefix};
+use crate::proxy::connection::IDLE_TIMEOUT;
+use crate::tool::gen_auth_token;
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
-use crate::algo::{decode_chunk, ProxyAlgo};
-use crate::frames::{enc_frame, make_frame, Frame, FrameCache};
-use crate::http::{HeaderPaser, ReqHeader, UrlBuilder};
-use crate::proxy::body::{split_body_prefix, BodyExtent, PumpTracker};
-use crate::proxy::connection::IDLE_TIMEOUT;
-use crate::tool::gen_auth_token;
 
-use super::{read_raw, RawRead, READ_BUF, Shared};
+use super::{RawRead, Shared, read_raw};
 
-
-
+/// 断开探测缓冲大小（只需少量字节即可判断连接存活）
+const PROBE_BUF: usize = 512;
 
 /// 执行标准 HTTP 请求的代理转发：
 /// 头帧 → body 泵送 → 等待 worker 响应 → 响应回传浏览器。
 pub async fn handle_http_proxy<S>(
     stream: &mut S,
-    parser: &mut HeaderPaser,
+    parser: &mut HeaderParser,
     header: &ReqHeader,
     mut remaining: BytesMut,
     extent: BodyExtent,
@@ -176,14 +174,13 @@ pub(super) async fn write_502<S: AsyncWrite + Unpin>(stream: &mut S) -> Result<(
     Ok(())
 }
 
-
-
-/// 转发一段字节给 worker（带 96s 上限，防上传卡死）
-async fn send_to_worker(tx: &tokio::sync::mpsc::Sender<Bytes>, data: &[u8]) -> Result<()> {
-    if data.is_empty() {
+/// 转发一段字节给 worker
+/// `payload` 为 tracker 产出的负载，直接 freeze 零拷贝进通道，不再二次复制。
+async fn send_to_worker(tx: &tokio::sync::mpsc::Sender<Bytes>, payload: BytesMut) -> Result<()> {
+    if payload.is_empty() {
         return Ok(());
     }
-    if timeout(IDLE_TIMEOUT, tx.send(Bytes::copy_from_slice(data)))
+    if timeout(IDLE_TIMEOUT, tx.send(payload.freeze()))
         .await
         .map_err(|_| anyhow!("worker upload stalled"))?
         .is_err()
@@ -204,10 +201,9 @@ async fn pump_chunk(
     data: &[u8],
 ) -> Result<Option<usize>> {
     let pushed = tracker.push(data)?;
-    send_to_worker(tx, &pushed.payload).await?;
+    send_to_worker(tx, pushed.payload).await?;
     Ok(pushed.end_at)
 }
-
 
 /// 把 worker 的帧流解包写回浏览器。帧协议（FrameCache/decode_chunk）是
 /// 私有最小化二进制协议，无需语义解析；同时探测客户端提前断开，
@@ -217,7 +213,7 @@ async fn relay_response<S>(
     resp: reqwest::Response,
     algo: ProxyAlgo,
     shared: &Arc<Shared>,
-    parser: &mut HeaderPaser,
+    parser: &mut HeaderParser,
 ) -> Result<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -299,9 +295,9 @@ where
 /// 探测客户端是否已断开（读取可用字节）；未断开时字节存入 parser。
 async fn client_closed<S: AsyncRead + Unpin>(
     stream: &mut S,
-    parser: &mut HeaderPaser,
+    parser: &mut HeaderParser,
 ) -> Result<bool> {
-    let mut buf = [0u8; READ_BUF];
+    let mut buf = [0u8; PROBE_BUF];
     match stream.read(&mut buf).await {
         Ok(0) | Err(_) => Ok(true),
         Ok(n) => {

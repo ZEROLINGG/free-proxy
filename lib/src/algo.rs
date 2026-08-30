@@ -10,13 +10,12 @@
 use anyhow::{Result, anyhow};
 
 use crate::aead::{Ascon128, ChaCha20Poly1305, Cipher};
-use crate::compress::{Compressor, Gzip, Lz4, Zstd};
+use crate::compress::{Compressor, Lz4, Zstd};
 
 /// 压缩算法（与 server-rs 的 URL version 参数映射，见下方 `version()`）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProxyCompressor {
     Zstd,
-    Gzip,
     Lz4,
     /// 不压缩
     None,
@@ -28,7 +27,6 @@ impl std::str::FromStr for ProxyCompressor {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_lowercase().as_str() {
             "zstd" => Ok(Self::Zstd),
-            "gzip" => Ok(Self::Gzip),
             "lz4" => Ok(Self::Lz4),
             "none" => Ok(Self::None),
             _ => Err(anyhow!("invalid compressor: {s}")),
@@ -37,14 +35,13 @@ impl std::str::FromStr for ProxyCompressor {
 }
 
 impl ProxyCompressor {
-    pub const ALL: [ProxyCompressor; 4] = [Self::Zstd, Self::Gzip, Self::Lz4, Self::None];
+    pub const ALL: [ProxyCompressor; 3] = [Self::Zstd, Self::Lz4, Self::None];
 
     /// 规范名称（与 `FromStr` 输入格式一致，供 UI/序列化使用）。
     /// `name()` → `from_str()` 的往返由 `test_name_roundtrip` 锁定。
     pub fn name(self) -> &'static str {
         match self {
             Self::Zstd => "zstd",
-            Self::Gzip => "gzip",
             Self::Lz4 => "lz4",
             Self::None => "none",
         }
@@ -54,7 +51,6 @@ impl ProxyCompressor {
     pub fn version(self) -> &'static str {
         match self {
             Self::Zstd => "v1",
-            Self::Gzip => "v2",
             Self::Lz4 => "v3",
             Self::None => "v4",
         }
@@ -64,7 +60,6 @@ impl ProxyCompressor {
     pub fn from_version(s: &str) -> Result<Self> {
         match s.trim().to_lowercase().as_str() {
             "v1" => Ok(Self::Zstd),
-            "v2" => Ok(Self::Gzip),
             "v3" => Ok(Self::Lz4),
             "v4" => Ok(Self::None),
             _ => Err(anyhow!("invalid version: {s}")),
@@ -74,7 +69,6 @@ impl ProxyCompressor {
     fn compress(self, data: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::Zstd => Zstd::compress(data),
-            Self::Gzip => Gzip::compress(data),
             Self::Lz4 => Lz4::compress(data),
             Self::None => Ok(data.to_vec()),
         }
@@ -83,7 +77,6 @@ impl ProxyCompressor {
     pub(crate) fn decompress(self, data: &[u8]) -> Result<Vec<u8>> {
         match self {
             Self::Zstd => Zstd::decompress(data),
-            Self::Gzip => Gzip::decompress(data),
             Self::Lz4 => Lz4::decompress(data),
             Self::None => Ok(data.to_vec()),
         }

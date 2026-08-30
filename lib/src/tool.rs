@@ -1,22 +1,11 @@
 use crate::aead::{Ascon128, Cipher};
-use crate::base::{Base91, Encoder};
-use crate::hash::{Blake3, Hasher};
-use crate::kdf::{HkdfSha256, Kdf, Pbkdf2HmacSha256};
+use crate::base::{Base64, Encoder};
+use crate::hash::{Sha256, Hasher};
+use crate::kdf::{HkdfSha256, Kdf};
 use anyhow::anyhow;
 
-pub fn xoroshiro128(s: u128) -> u128 {
-    let mut s0 = (s >> 64) as u64;
-    let mut s1 = s as u64;
-
-    s1 ^= s0;
-    s0 = s0.rotate_left(24) ^ s1 ^ (s1 << 16);
-    s1 = s1.rotate_left(37);
-
-    ((s0 as u128) << 64) | (s1 as u128)
-}
-
 pub fn token_auth(token_tmp: &str, token_base: &[u8; 16], now: u64) -> bool {
-    let encrypted_data = match Base91::decode(token_tmp) {
+    let encrypted_data = match Base64::decode(token_tmp) {
         Ok(data) => data,
         Err(_) => return false,
     };
@@ -44,7 +33,7 @@ pub fn token_gen(token_base: &[u8; 16], now: u64, nonce: u64) -> String {
     payload[8..16].copy_from_slice(&now.to_be_bytes());
 
     match Ascon128::encrypt(&payload, token_base.as_ref()) {
-        Ok(encrypted) => Base91::encode(encrypted).unwrap_or_default(),
+        Ok(encrypted) => Base64::encode(encrypted).unwrap_or_default(),
         Err(_) => String::new(),
     }
 }
@@ -70,12 +59,12 @@ pub struct DerivedKeys {
 
 
 pub fn derive_keys(auth_key: &str, domain: &str) -> anyhow::Result<DerivedKeys> {
-    let k = Blake3::digest_vec(auth_key.as_bytes());
-    let d = Blake3::digest_vec(domain.as_bytes());
-    let key16: [u8; 16] = Pbkdf2HmacSha256::derive(&k, &d, 16)?
+    let k = Sha256::digest_vec(auth_key.as_bytes());
+    let d = Sha256::digest_vec(domain.as_bytes());
+    let key16: [u8; 16] = HkdfSha256::derive(&k, &d, 16)?
         .try_into()
         .map_err(|v: Vec<u8>| anyhow!("key16 derived {} bytes, expected 16", v.len()))?;
-    let key32: [u8; 32] = Pbkdf2HmacSha256::derive(&k, &d, 32)?
+    let key32: [u8; 32] = HkdfSha256::derive(&k, &d, 32)?
         .try_into()
         .map_err(|v: Vec<u8>| anyhow!("key32 derived {} bytes, expected 32", v.len()))?;
     let token_base: [u8; 16] = HkdfSha256::derive(&key32, &key16, 16)?
@@ -93,7 +82,7 @@ pub fn derive_keys(auth_key: &str, domain: &str) -> anyhow::Result<DerivedKeys> 
 #[cfg(feature = "client")]
 pub fn derive_ca_key_secret(device_uid: &str, salt: &[u8]) -> anyhow::Result<[u8; 32]> {
     use crate::kdf::{HkdfSha512, Kdf};
-    let ikm = Blake3::digest_vec(device_uid.as_bytes());
+    let ikm = Sha256::digest_vec(device_uid.as_bytes());
     let out = HkdfSha512::derive(ikm, salt, 32)?;
     Ok(out
         .try_into()

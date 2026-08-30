@@ -27,24 +27,37 @@ Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `
 ├── lib/src/                      # shared protocol core — compiles for native AND wasm32
 │   ├── aead.rs                   #   AEAD ciphers: ChaCha20-Poly1305 / Ascon-AEAD128
 │   ├── algo.rs                   #   compressor × AEAD negotiation + URL contract /api/{version}/{target}
-│   ├── base.rs                   #   base encodings (base64 / z85 / base91)
-│   ├── compress.rs               #   zstd / gzip / lz4
+│   ├── base.rs                   #   base encodings (base64)
+│   ├── client/                   #   CLIENT ONLY (feature "client"): shared client-side ops
+│   │   ├── mod.rs                #     ProxySettings / IDENTIFIER / DEFAULT_PORT re-exports
+│   │   ├── config.rs             #     settings.json (shares app_data_dir, syncs CLI & GUI)
+│   │   ├── ca.rs                 #     local CA certificate management
+│   │   ├── speed.rs              #     pref-IP speed-test orchestration facade
+│   │   └── subscribe.rs          #     Clash / sing-box / base64 subscription export
+│   ├── compress.rs               #   zstd / lz4
 │   ├── frames.rs                 #   binary frame stream: [u32 BE len | payload], zero-length frame = EOS
-│   ├── hash.rs                   #   sha1/sha2/blake3 wrappers
+│   ├── hash.rs                   #   sha1/sha2 wrappers
 │   ├── http.rs                   #   httparse header parsing + UrlBuilder (zero-copy)
-│   ├── kdf.rs                    #   PBKDF2 / scrypt / HKDF wrappers
+│   ├── kdf.rs                    #   HKDF wrappers
+│   ├── lib.rs                    #   crate root: feature-gated re-exports + log init
+│   ├── log.rs                    #   unified error!/warn!/info!/debug!/trace! macros
 │   ├── tool.rs                   #   derive_keys (auth_key+domain), time-window token auth, XOR obfuscation
 │   ├── ws.rs                     #   RFC 6455 frames + WsTunnelMsg (shared by client & worker)
 │   ├── proxy/                    #   CLIENT ONLY (feature "client"): local HTTP proxy
 │   │   ├── mod.rs                #     ProxyConfig / Shared / Proxy lifecycle facade
 │   │   ├── connection.rs         #     connection dispatch (plain HTTP vs CONNECT)
-│   │   ├── relay.rs              #     forwarding engine (serve loop, keep-alive via EOS)
 │   │   ├── body.rs               #     request-body boundary parsing
 │   │   ├── client.rs             #     upstream reqwest clients (main/pref-IP/WS HTTP1.1)
 │   │   ├── tls.rs                #     MITM TLS: self-signed CA + per-SNI leaf certs (moka cache)
-│   │   └── ws.rs                 #     WS tunnel client side (RFC6455 parse/mask/reassemble)
+│   │   └── core/                 #     forwarding engine (serve loop, keep-alive via EOS)
+│   │       ├── mod.rs            #       read_raw / RawRead (read_buf zero-copy read loop)
+│   │       ├── http.rs           #       HTTP relay: head frame → body pump → response relay
+│   │       └── ws.rs             #       WS tunnel client side (RFC6455 parse/mask/reassemble;
+│   │                             #       upload/download/writer tasks + ctrl/data channels)
 │   └── speed_test/               #   CLIENT ONLY: 优选 IP two-phase speed test
-│       ├── tcping.rs health.rs   #     phase 1 tcping → phase 2 Worker /health check
+│       ├── mod.rs                #     module root
+│       ├── tcping.rs             #     phase 1: TCP-connect latency probe
+│       ├── health.rs             #     phase 2: Worker /health check
 │       └── ip.rs                 #     Cloudflare IP candidate ranges
 ├── server-rs/
 │   ├── wrangler.toml             # worker config; [dev] port=80; DO NOT touch compatibility_flags
@@ -54,6 +67,7 @@ Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `
 │       ├── proxy_http.rs         #   POST /api/{version}/{target}: streaming decrypt→fetch→re-encrypt
 │       ├── proxy_ws.rs           #   GET /ws/{version}/{target}: upstream WS handshake + full-duplex relay
 │       ├── subscribe.rs          #   GET /subscribe/{port}: Clash / sing-box / base64 subscription
+│       ├── test.rs               #   已注释掉的 wasm32 性能基准暂存文件
 │       └── lib.rs                #   worker entrypoint
 ├── client_cli/src/               # CLI client: main.rs (clap), run.rs (proxy loop), speed.rs,
 │                                 # health.rs, ca.rs (cert install), subscribe.rs,

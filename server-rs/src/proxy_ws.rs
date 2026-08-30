@@ -320,7 +320,7 @@ pub(crate) async fn proxy_ws(
                         match tunnel {
                             WsTunnelMsg::Text(t) => { let _ = upstream_tx.send_with_str(&t); }
                             WsTunnelMsg::Binary(b) => { let _ = upstream_tx.send_with_bytes(b); }
-                            WsTunnelMsg::Ping(_) | WsTunnelMsg::Pong(_) => {}
+                            WsTunnelMsg::Ping(_) => {}
                             WsTunnelMsg::Close(c) => {
                                 match c {
                                     Some((code, reason)) => { let _ = upstream_tx.close(Some(code), reason); }

@@ -52,11 +52,11 @@ impl ReqHeader {
     }
 }
 
-pub struct HeaderPaser {
+pub struct HeaderParser {
     buffer: BytesMut,
 }
 
-impl HeaderPaser {
+impl HeaderParser {
     pub fn new() -> Self {
         Self {
             buffer: BytesMut::with_capacity(4096),
@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_header_paser_roundtrip_with_remaining() {
-        let mut parser = HeaderPaser::new();
+        let mut parser = HeaderParser::new();
         let wire = b"POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: 11\r\n\r\nhello worldGET /next HTTP/1.1\r\nHost: e.com\r\n\r\n";
         parser.push(wire).unwrap();
 

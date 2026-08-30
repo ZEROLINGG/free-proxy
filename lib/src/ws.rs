@@ -12,7 +12,7 @@ const MAX_WS_PAYLOAD_LEN: u64 = 64 * 1024 * 1024; // 64 MiB
 
 /// WebSocket 操作码
 #[repr(u8)]
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum WsOpCode {
     Continuation = 0x0,
     Text = 0x1,
@@ -86,7 +86,7 @@ impl TryFrom<u8> for WsOpCode {
 }
 
 /// WebSocket 帧
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsFrame {
     pub fin: bool,
     pub rsv1: bool,
@@ -134,18 +134,6 @@ impl WsFrame {
         }
     }
 
-    pub fn new_ping(payload: Vec<u8>, mask: Option<[u8; 4]>) -> Self {
-        Self {
-            fin: true,
-            rsv1: false,
-            rsv2: false,
-            rsv3: false,
-            opcode: WsOpCode::Ping,
-            mask_key: mask,
-            payload,
-        }
-    }
-
     pub fn new_pong(payload: Vec<u8>, mask: Option<[u8; 4]>) -> Self {
         Self {
             fin: true,
@@ -180,20 +168,8 @@ impl WsFrame {
 
     // ---------- 语义判断/取值 ----------
 
-    pub fn is_control(&self) -> bool {
-        self.opcode.is_control()
-    }
-
     pub fn is_data(&self) -> bool {
         self.opcode.is_data()
-    }
-
-    pub fn is_text(&self) -> bool {
-        self.opcode == WsOpCode::Text
-    }
-
-    pub fn is_binary(&self) -> bool {
-        self.opcode == WsOpCode::Binary
     }
 
     pub fn is_close(&self) -> bool {
@@ -512,7 +488,6 @@ pub enum WsTunnelMsg {
     Text(String),
     Binary(Vec<u8>),
     Ping(Vec<u8>),
-    Pong(Vec<u8>),
     Close(Option<(u16,Option<String>)>),
     Return(Vec<u8>),     // 下行的可直接写入tcp的数据
     Error(String)

@@ -6,7 +6,7 @@
 use anyhow::{Result, ensure};
 use reqwest::Method;
 use tokio::task::JoinSet;
-
+use lib::hash::{Hasher, Sha256};
 use crate::test::BROWSER;
 use crate::util;
 
@@ -38,7 +38,7 @@ async fn download_check(size: u64) -> Result<()> {
 async fn upload_check(size: usize) -> Result<()> {
     let data = util::pattern_bytes(size);
     let expect_len = data.len() as u64;
-    let expect_hash = util::blake3_hex(&data);
+    let expect_hash = Sha256::digest_hex(&data);
 
     let url = format!("{}/upload", base());
     let resp = BROWSER
@@ -207,7 +207,7 @@ pub async fn http_multi_cookie() -> Result<()> {
 
 async fn upload_raw(payload: Vec<u8>) -> Result<()> {
     let expect_len = payload.len() as u64;
-    let expect_hash = util::blake3_hex(&payload);
+    let expect_hash = Sha256::digest_hex(&payload);
     let url = format!("{}/upload", base());
     let resp = BROWSER
         .post(&url)
@@ -264,7 +264,7 @@ pub async fn chunked_up_256kb() -> Result<()> {
             Ok(buf)
         })
         .collect();
-    let expect_hash = util::blake3_hex(&expect_hasher_input);
+    let expect_hash = Sha256::digest_hex(&expect_hasher_input);
 
     let stream = futures_util::stream::iter(chunks);
     let url = format!("{}/upload", base());
@@ -349,9 +349,9 @@ pub async fn negative_unconnectable_502() -> Result<()> {
 }
 
 
-pub async fn gzip_body() -> Result<()> {
+pub async fn zstd_body() -> Result<()> {
     let resp = BROWSER
-        .get(format!("{}/gzip", base()))
+        .get(format!("{}/zstd", base()))
         .send()
         .await?
         .error_for_status()?;
@@ -363,11 +363,10 @@ pub async fn gzip_body() -> Result<()> {
     let body = resp.bytes().await?;
 
     // worker已经自动解压
-    let mut expect = vec![0x1f, 0x8b];
-    expect.extend_from_slice(b"GZIP-MARKER-PAYLOAD");
+    let mut data = *b"w7y37y7d37dguwnjicjoe0iw9uj8hg";
     ensure!(
-        body.as_ref() == expect.as_slice(),
-        "gzip route body corrupted en route"
+        body.as_ref() == data.as_slice(),
+        "Abnormal response {:?}", ce
     );
     Ok(())
 }

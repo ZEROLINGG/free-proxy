@@ -86,7 +86,6 @@ export interface ProxyAvailability {
 
 export const COMPRESSORS: { value: Compressor; label: string }[] = [
   { value: "zstd", label: "Zstandard" },
-  { value: "gzip", label: "Gzip" },
   { value: "lz4", label: "LZ4" },
   { value: "none", label: "None（不压缩）" },
 ];

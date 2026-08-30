@@ -59,59 +59,6 @@ impl Compressor for Lz4 {
     }
 }
 
-// ====================== Gzip ======================
-
-pub struct Gzip;
-
-impl Compressor for Gzip {
-    fn compress<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>> {
-        use flate2::{Compression, write::GzEncoder};
-        use std::io::Write;
-
-        let input = input.as_ref();
-        let cap = input.len() + (input.len() / 10).max(64) + 18;
-        let mut encoder = GzEncoder::new(Vec::with_capacity(cap), Compression::default());
-
-        encoder.write_all(input)?;
-        Ok(encoder.finish()?)
-    }
-
-    fn decompress(input: &[u8]) -> Result<Vec<u8>> {
-        use flate2::read::GzDecoder;
-        use std::io::Read;
-
-        let bomb_limit = bomb_limit_for(input.len());
-
-        let declared_size = if input.len() >= 4 {
-            let isize_bytes: [u8; 4] = input[input.len() - 4..].try_into()?;
-            let original_size = u32::from_le_bytes(isize_bytes) as u64;
-
-            if original_size > bomb_limit {
-                return Err(anyhow!(
-                    "Gzip decompression bomb detected via ISIZE: {} exceeds limit {}",
-                    original_size,
-                    bomb_limit
-                ));
-            }
-            Some(original_size)
-        } else {
-            None
-        };
-
-        let estimated_cap = safe_prealloc_cap(declared_size, input.len());
-
-        let mut buf = Vec::with_capacity(estimated_cap);
-        let mut limited_reader = GzDecoder::new(input).take(bomb_limit + 1);
-
-        limited_reader.read_to_end(&mut buf)?;
-
-        if buf.len() as u64 > bomb_limit {
-            return Err(anyhow!("Gzip decompression bomb detected during read"));
-        }
-
-        Ok(buf)
-    }
-}
 
 // ====================== Zstd ======================
 
@@ -188,27 +135,10 @@ mod tests {
         round_trip::<Lz4>("lz4");
     }
     #[test]
-    fn test_gzip() {
-        round_trip::<Gzip>("gzip");
-    }
-    #[test]
     fn test_zstd() {
         round_trip::<Zstd>("zstd");
     }
 
-    // ====================== Bomb Protection Tests ======================
-
-    #[test]
-    fn test_gzip_bomb_rejected() {
-        let mut compressed = Gzip::compress(SAMPLE).expect("compress failed");
-        let len = compressed.len();
-        // Tamper with the gzip ISIZE field, claiming ~4GB decompressed size.
-        compressed[len - 4..].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
-        assert!(
-            Gzip::decompress(&compressed).is_err(),
-            "gzip bomb should be rejected"
-        );
-    }
 
     #[test]
     fn test_lz4_bomb_rejected() {
@@ -234,7 +164,6 @@ mod tests {
         let garbage = b"this is definitely not valid compressed data!!!";
 
         assert!(Lz4::decompress(garbage).is_err());
-        assert!(Gzip::decompress(garbage).is_err());
         assert!(Zstd::decompress(garbage).is_err());
     }
 }
