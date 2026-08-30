@@ -171,7 +171,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_invalid_key_length_rejected() {
         assert!(ChaCha20Poly1305::encrypt(b"data", &[0u8; 16]).is_err());
     }

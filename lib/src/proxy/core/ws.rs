@@ -1,15 +1,3 @@
-// lib/src/proxy/ws.rs
-//
-// 本地 WebSocket 隧道：浏览器 ws:// 或 wss:// 升级请求 → 加密 WsTunnelMsg 隧道 → worker。
-//
-// 与 server-rs 的 proxy_ws 严格对称（非对称传输设计）：
-//   - 上行（浏览器 → worker）：逐帧解析本地 TCP 上的 RFC 6455 字节流
-//     （WsFrame::parse 自动解掩码），Text/Binary 经 WsCache 分片重组后封装为
-//     WsTunnelMsg::Text/Binary；Ping 本地直接回 Pong（不占隧道）；
-//     Close 回写 Close 帧应答后发 WsTunnelMsg::Close。
-//   - 下行（worker → 浏览器）：收到 WsTunnelMsg::Return(Vec<u8>) 不解析，
-//     直接把原始字节（101 响应头 / 数据帧 / close 帧）写入本地 TCP。收到 Error 时，
-//     根据握手状态反馈 HTTP 502 或 WS Close 帧。
 
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, Bytes, BytesMut};
@@ -19,42 +7,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
-
 use crate::algo::{ProxyAlgo, decode_chunk, encode_chunk};
 use crate::http::ReqHeader;
+use crate::proxy::connection::IDLE_TIMEOUT;
+use crate::proxy::core::{read_raw, RawRead};
 use crate::tool::gen_auth_token;
 use crate::ws::{WsCache, WsData, WsFrame, WsTunnelMsg};
 
-use super::relay::{RawRead, read_raw};
 use super::Shared;
 
-/// 隧道侧保活 Ping 间隔（小于 CF 约 100s 的空闲断开阈值）
 const TUNNEL_PING_INTERVAL: Duration = Duration::from_secs(60);
-/// 浏览器侧无帧超时（含浏览器回 Pong 会重置）
-const BROWSER_IDLE_TIMEOUT: Duration = Duration::from_secs(96);
 
-/// 序列化 + 压缩加密为隧道消息负载
-fn tunnel_payload(
-    msg: &WsTunnelMsg,
-    algo: ProxyAlgo,
-    key16: &[u8],
-    key32: &[u8],
-) -> Result<Bytes> {
-    let serialized = msg.serialize()?;
-    Ok(Bytes::from(encode_chunk(
-        &serialized,
-        algo.compressor,
-        algo.aead,
-        key16,
-        key32,
-    )?))
-}
+
 
 /// 浏览器 WS 升级请求 → worker WS 隧道全生命周期。
 ///
 /// `header` 为浏览器原始升级请求，`remaining` 为其后同包到达的超读字节
 /// （可能已含首批 WS 帧），`is_https` 决定头帧末尾的 wss 标志位。
-pub(super) async fn handle_ws_tunnel<S>(
+pub(crate) async fn handle_ws_proxy<S>(
     stream: &mut S,
     header: &ReqHeader,
     remaining: BytesMut,
@@ -201,7 +171,7 @@ where
                 _ = tokio::time::sleep(TUNNEL_PING_INTERVAL) => {
                     ws_tx.send(Message::Ping(Bytes::new())).await?;
                 }
-                r = read_raw(&mut rd, BROWSER_IDLE_TIMEOUT) => {
+                r = read_raw(&mut rd, IDLE_TIMEOUT) => {
                     match r? {
                         RawRead::Data(data) => buf.extend_from_slice(&data),
                         RawRead::Eof | RawRead::TimedOut => {
@@ -295,4 +265,21 @@ where
     }
 
     Ok(())
+}
+
+/// 序列化 + 压缩加密为隧道消息负载
+fn tunnel_payload(
+    msg: &WsTunnelMsg,
+    algo: ProxyAlgo,
+    key16: &[u8],
+    key32: &[u8],
+) -> Result<Bytes> {
+    let serialized = msg.serialize()?;
+    Ok(Bytes::from(encode_chunk(
+        &serialized,
+        algo.compressor,
+        algo.aead,
+        key16,
+        key32,
+    )?))
 }

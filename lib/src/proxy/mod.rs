@@ -4,8 +4,9 @@
 //   - ProxyConfig：对外配置入口
 //   - Shared：跨连接共享状态（密钥、算法、上游 client、优选 IP、TLS）
 //   - Proxy：启停、算法/优选 IP 热切换、可用性检测
-//   - 协议细节按职责分布在子模块：connection（连接分发）、relay（转发引擎）、
-//     body（请求体边界解析）、client（上游通信层）、tls（MITM）、ws（WS 隧道）
+//   - 协议细节按职责分布在子模块：connection（连接分发 + keep-alive 循环）、
+//     core/http（HTTP 转发引擎）、core/ws（WS 隧道）、body（请求体边界解析）、
+//     client（上游通信层）、tls（MITM）
 //
 // 明文 HTTP / CONNECT 隧道内 HTTPS 统一为泛型 serve() 循环（编译期单态化两份）；
 // keep-alive：收到 EOS 且客户端未断开即可复用连接。
@@ -13,9 +14,8 @@
 mod body;
 mod client;
 mod connection;
-mod relay;
 pub mod tls;
-mod ws;
+mod core;
 
 pub use client::{check_proxy_availability, ProxyCheck};
 pub use tls::TlsManager;
