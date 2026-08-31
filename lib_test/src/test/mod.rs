@@ -8,6 +8,7 @@ use crate::cs::proxy_url;
 
 pub mod base;
 pub mod http;
+pub mod ws;
 
 pub static BROWSER: LazyLock<Client> = LazyLock::new(|| {
     ClientBuilder::new()

@@ -10,7 +10,7 @@ use crate::test::print_report;
 use crate::web::WebServer;
 
 #[allow(unused)]
-use crate::test::{base::*, http::*};
+use crate::test::{base::*, http::*, ws::*};
 
 
 #[tokio::main]
@@ -98,7 +98,22 @@ async fn main() -> Result<()> {
         (gzip_body),
         (zstd_body),
         (deflate_body),
-        (br_body)
+        (br_body),
+
+        // ── WebSocket 隧道 ──
+        (ws_echo_text),
+        (ws_echo_binary),
+        (ws_echo_roundtrip_10),
+        (ws_large_binary_64k, 15),
+        (ws_large_binary_1mb, 20),
+        (ws_ping_pong),
+        (ws_close_from_client),
+        (ws_close_from_server),
+        (ws_binary_stream_down, 15),
+        (ws_concurrent_5, 15),
+        (ws_binary_symmetric_4k),
+        (ws_binary_symmetric_65k, 15),
+        (ws_online_echo, 15)
     );
 
     let ok = print_report(results);

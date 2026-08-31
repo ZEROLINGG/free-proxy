@@ -6,12 +6,14 @@
 
 use anyhow::Result;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Request};
+use axum::extract::{Path, Request, WebSocketUpgrade};
+use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use futures_util::{SinkExt, StreamExt};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -152,6 +154,64 @@ async fn br_body() -> Response {
 }
 
 
+// ─── WebSocket 端点 ─────────────────────────────────────────────────────────
+
+async fn ws_echo_upgrade(ws: WebSocket) {
+    let (mut tx, mut rx) = ws.split();
+    while let Some(Ok(msg)) = rx.next().await {
+        if tx.send(msg).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn ws_echo_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(ws_echo_upgrade)
+}
+
+async fn ws_echo_delay_upgrade(ws: WebSocket) {
+    let (mut tx, mut rx) = ws.split();
+    while let Some(Ok(msg)) = rx.next().await {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if tx.send(msg).await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn ws_echo_delay_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(ws_echo_delay_upgrade)
+}
+
+async fn ws_close_upgrade(mut ws: WebSocket) {
+    let _ = ws.send(AxumMessage::Close(Some(axum::extract::ws::CloseFrame {
+        code: 1000u16.into(),
+        reason: "server initiated close".into(),
+    }))).await;
+}
+
+async fn ws_close_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(ws_close_upgrade)
+}
+
+async fn ws_binary_stream_upgrade(mut ws: WebSocket) {
+    let frame_count = 20;
+    let frame_size = 1024usize;
+    for i in 0..frame_count {
+        let mut buf = vec![0u8; frame_size];
+        util::fill_pattern(&mut buf, i as u64 * frame_size as u64);
+        if ws.send(AxumMessage::Binary(buf.into())).await.is_err() {
+            break;
+        }
+    }
+    let _ = ws.close().await;
+}
+
+async fn ws_binary_stream_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(ws_binary_stream_upgrade)
+}
+
+
 async fn print_request_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
@@ -200,6 +260,10 @@ impl WebServer {
             .route("/gzip", get(gzip_body))
             .route("/deflate", get(deflate_body))
             .route("/br", get(br_body))
+            .route("/ws/echo", get(ws_echo_handler))
+            .route("/ws/echo-delay", get(ws_echo_delay_handler))
+            .route("/ws/close", get(ws_close_handler))
+            .route("/ws/binary-stream", get(ws_binary_stream_handler))
             .layer(axum::extract::DefaultBodyLimit::disable())
             .layer(middleware::from_fn(print_request_middleware));
 
