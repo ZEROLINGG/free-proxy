@@ -215,25 +215,113 @@ pub fn init(cfg: LogConfig) -> std::io::Result<()> {
 // WASM 模块
 // -----------------------------------------------------------------------------
 
-/// 初始化日志（wasm worker：输出到控制台）。
 #[cfg(target_arch = "wasm32")]
-pub fn init_wasm(tag: impl Into<String>, default_level: impl AsRef<str>) {
-    #[allow(unused)]
+pub struct WasmLogConfig {
+    pub tag: String,
+    pub default_level: String,
+    /// 终端 ANSI 着色（在 wrangler dev 或支持 ANSI 的终端中非常有用）
+    pub with_ansi: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for WasmLogConfig {
+    fn default() -> Self {
+        Self {
+            tag: "".into(),
+            default_level: "warn".into(),
+            with_ansi: true,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct WasmMakeWriter;
+
+#[cfg(target_arch = "wasm32")]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for WasmMakeWriter {
+    type Writer = WasmWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        WasmWriter::new(tracing::Level::INFO)
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        WasmWriter::new(*meta.level())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmWriter {
+    level: tracing::Level,
+    buffer: Vec<u8>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmWriter {
+    fn new(level: tracing::Level) -> Self {
+        Self {
+            level,
+            buffer: Vec::with_capacity(256),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Write for WasmWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WasmWriter {
+    fn drop(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+
+        let msg = String::from_utf8_lossy(&self.buffer);
+        // 去除末尾换行，避免 JS console.log 双重换行
+        let js_msg = wasm_bindgen::JsValue::from_str(msg.trim_end());
+
+        match self.level {
+            tracing::Level::ERROR => web_sys::console::error_1(&js_msg),
+            tracing::Level::WARN => web_sys::console::warn_1(&js_msg),
+            tracing::Level::INFO => web_sys::console::info_1(&js_msg),
+            tracing::Level::DEBUG | tracing::Level::TRACE => web_sys::console::debug_1(&js_msg),
+        }
+    }
+}
+
+/// 初始化日志（WASM Worker），行为与 Native 一致
+#[cfg(target_arch = "wasm32")]
+pub fn init_wasm(cfg: WasmLogConfig) {
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
 
-    set_tag(tag);
+    set_tag(cfg.tag);
 
-    let filter = tracing_subscriber::EnvFilter::try_new(default_level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let filter = tracing_subscriber::EnvFilter::try_new(&cfg.default_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
+        .add_directive("hyper=info".parse().unwrap())
+        .add_directive("hyper_util=info".parse().unwrap())
+        .add_directive("glycin=info".parse().unwrap());
 
-    let mut builder = tracing_wasm::WASMLayerConfigBuilder::new();
-    builder.set_report_logs_in_timings(false);
-    builder.set_max_level(tracing::Level::TRACE);
-    builder.set_console_config(tracing_wasm::ConsoleConfig::ReportWithConsoleColor);
-    let layer = tracing_wasm::WASMLayer::new(builder.build());
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(WasmMakeWriter)
+        .with_ansi(cfg.with_ansi)
+        .compact()
+        .with_thread_ids(false)
+        .without_time()
+        .with_filter(filter);
 
     let _ = tracing::subscriber::set_global_default(
-        tracing_subscriber::registry().with(layer).with(filter),
+        tracing_subscriber::registry().with(layer),
     );
 }

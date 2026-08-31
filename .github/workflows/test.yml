@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -14,11 +17,17 @@ concurrency:
 
 jobs:
   e2e:
-    name: E2E 全链路门禁
-    runs-on: ubuntu-24.04
+    name: E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout Code
+        uses: actions/checkout@v6
 
       - name: Setup Node.js 22
         uses: actions/setup-node@v6
@@ -45,8 +54,17 @@ jobs:
       - name: Install wrangler
         run: npm i -g wrangler@4.120.0
 
-      - name: Allow unprivileged binding of port 80
+      - name: Free up port 80 (Linux)
+        if: runner.os == 'Linux'
         run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+
+      - name: Free up port 80 (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+          Stop-Service -Name PeerDistSvc -Force -ErrorAction SilentlyContinue
+          Stop-Service -Name SyncShareSvc -Force -ErrorAction SilentlyContinue
 
       - name: Run full E2E suite
         run: pnpm run test-e2e

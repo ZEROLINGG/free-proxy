@@ -76,8 +76,9 @@ server = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
-tracing-wasm = { version = "0.2" }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "fmt", "ansi"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full"] }

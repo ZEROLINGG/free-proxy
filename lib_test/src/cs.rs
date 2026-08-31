@@ -48,6 +48,7 @@ impl Server {
             r#"key = "{key}"
 domain = "127.0.0.1"
 log = "debug"
+ansi_log = "true"
 "#
         );
 
@@ -132,14 +133,13 @@ log = "debug"
                         && !line.contains("All rights reserved.")
                         && !line.contains("Install the latest PowerShell for new features and improvements!")
                         && !line.contains("https://aka.ms/PSWindows")
-                        && !(line != "PS >")
-                        && !(line != "$")
+                        && !(line == "PS > ")
+                        && !(line == "$ ")
                         && !line.contains("Loading personal and system profiles took")
 
                     {
                         if line.contains("444 [ERROR]:server-dev 444") {
                             println!("\x1b[1;31m[ERROR]wrangler crashed abnormally!!!\x1b[0m");
-                            // 设置崩溃标志
                             flag.store(true, Ordering::SeqCst);
                         } else {
                             println!("{line}");

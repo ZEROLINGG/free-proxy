@@ -50,8 +50,6 @@ pub(crate) async fn proxy(
     Path((version, target)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, (StatusCode, String)> {
-    lib::debug!("start");
-
     let experimental = state
         .env
         .var("experimental")
@@ -201,6 +199,12 @@ pub(crate) async fn proxy(
         {
             continue;
         }
+        // if k.eq_ignore_ascii_case("accept-encoding") {
+        //     fetch_headers
+        //         .append(k, "gzip,br")
+        //         .map_err(|_| error!(BAD_REQUEST, "Invalid Header"))?;
+        //     continue
+        // }
         fetch_headers
             .append(k, *v)
             .map_err(|_| error!(BAD_REQUEST, "Invalid Header"))?;
@@ -330,7 +334,7 @@ pub(crate) async fn proxy(
 
     let status: u16 = upstream_resp.status_code();
     let resp_headers: Vec<(String, String)> = upstream_resp.headers().entries().collect();
-    lib::warn!("[upstream_resp raw]: status:{} headers: {:?}", status, resp_headers.iter().take(8));
+    lib::debug!("[upstream_resp raw]: status:{} headers: {:?}", status, resp_headers.iter().take(8));
 
     let body_stream: LocalBoxStream<'static, Result<Vec<u8>, worker::Error>> =
         match upstream_resp.into_parts().1 {

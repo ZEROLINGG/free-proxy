@@ -23,14 +23,27 @@ fn build_state(env: &Env) -> Result<DerivedKeys> {
     derive_keys(&key, &domain)
 }
 
+#[allow(dead_code)]
+static LOG_INIT: OnceLock<()> = OnceLock::new();
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, ctx: Context) -> Result<axum::http::Response<Body>> {
-    #[cfg(target_arch = "wasm32")] {
-        static LOG_INIT: OnceLock<()> = OnceLock::new();
-        let log = env.var("log").map_or("info".into(), |v| v.to_string());
-        LOG_INIT.get_or_init(|| lib::log::init_wasm("[worker]", log));
-    }
-
+    #[cfg(target_arch = "wasm32")]
+    LOG_INIT.get_or_init(|| {
+        lib::log::init_wasm(
+            lib::log::WasmLogConfig {
+                tag: "[worker]".into(),
+                default_level: env.var("log").map_or("info".into(), |v| v.to_string()),
+                with_ansi: env.var("ansi_log").map(|v|v.to_string())
+                    .map_or(false, |v| {
+                    let s = v.trim();
+                    s.eq_ignore_ascii_case("true")
+                        || s.eq_ignore_ascii_case("1")
+                        || s.eq_ignore_ascii_case("use")
+                        || s.eq_ignore_ascii_case("enable")
+                }),
+            }
+        )
+    });
 
     let keys = match STATE.get() {
         Some(s) => s.clone(),
