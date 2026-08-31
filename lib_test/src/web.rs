@@ -109,13 +109,48 @@ async fn cookies() -> Response {
 }
 
 
-async fn zstd() -> Response {
-    let mut data = *b"11223344556677889911223344556677889900000000000000000000000000000000000000000000000000";
-    let mut resp = Body::from(Zstd::compress(data).unwrap()).into_response();
+
+pub const TEST_PAYLOAD: &[u8] = b"1122334455667788991122334455667788990000000000000000000000000000000000000000000000000011223344556677889911223344556677889900000000000000000000000000000000000000000000000000";
+
+/// 统一构造「指定编码头 + 指定 body」的响应，保持各编码端点单一变量
+fn encoded_body(body: Vec<u8>, encoding: &'static str) -> Response {
+    let mut resp = Body::from(body).into_response();
     resp.headers_mut()
-        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
     resp
 }
+
+async fn zstd_body() -> Response {
+    encoded_body(Zstd::compress(TEST_PAYLOAD).unwrap(), "zstd")
+}
+
+
+async fn gzip_body() -> Response {
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(TEST_PAYLOAD).unwrap();
+    encoded_body(enc.finish().unwrap(), "gzip")
+}
+
+async fn deflate_body() -> Response {
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(TEST_PAYLOAD).unwrap();
+    encoded_body(enc.finish().unwrap(), "deflate")
+}
+
+async fn br_body() -> Response {
+    let mut out = Vec::new();
+    let mut params = brotli::enc::BrotliEncoderParams::default();
+    params.quality = 5;
+    let mut data = TEST_PAYLOAD;
+    brotli::BrotliCompress(&mut data, &mut out, &params).unwrap();
+    encoded_body(out, "br")
+}
+
 
 async fn print_request_middleware(req: Request, next: Next) -> Response {
     let method = req.method().clone();
@@ -161,7 +196,10 @@ impl WebServer {
             .route("/redirect/{n}", get(redirect))
             .route("/redirect-done", get(redirect_done))
             .route("/cookies", get(cookies))
-            .route("/zstd", get(zstd))
+            .route("/zstd", get(zstd_body))
+            .route("/gzip", get(gzip_body))
+            .route("/deflate", get(deflate_body))
+            .route("/br", get(br_body))
             .layer(axum::extract::DefaultBodyLimit::disable())
             .layer(middleware::from_fn(print_request_middleware));
 

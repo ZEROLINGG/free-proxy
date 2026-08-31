@@ -90,9 +90,15 @@ async fn main() -> Result<()> {
         (chunked_up_256kb),
         (concurrent_mixed_24),
 
-        // ── 负向与zstd ──
+        // ── 负向 ──
         (negative_unconnectable_502),
+
+
+        // -- content-encoding --
+        (gzip_body),
         (zstd_body),
+        (deflate_body),
+        (br_body)
     );
 
     let ok = print_report(results);

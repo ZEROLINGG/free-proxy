@@ -18,10 +18,8 @@ port = 80
 enabled = false
 head_sampling_rate = 1
 
-# 注意：observability.enabled=false 时 logs 块不生效（配置须自洽）。
-# 如需在 Dashboard 捕获 Worker 日志，将上下两处 enabled 一并改为 true。
 [observability.logs]
-enabled = false
+enabled = true
 head_sampling_rate = 1
 persist = true
 invocation_logs = true

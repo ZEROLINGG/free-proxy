@@ -9,6 +9,7 @@ use tokio::task::JoinSet;
 use lib::hash::{Hasher, Sha256};
 use crate::test::BROWSER;
 use crate::util;
+use crate::web::TEST_PAYLOAD;
 
 /// 本地目标站基址
 fn base() -> &'static str {
@@ -357,10 +358,63 @@ pub async fn zstd_body() -> Result<()> {
         .error_for_status()?;
     let headers = resp.headers().clone();
     let body = resp.bytes().await?;
+    println!("[*] body: {:?} headers: {:?}", body, headers);
 
-    let mut data = *b"11223344556677889911223344556677889900000000000000000000000000000000000000000000000000";
     ensure!(
-        body.as_ref() == data.as_slice(),
+        body.as_ref() == TEST_PAYLOAD,
+        "Abnormal response body: {:?} headers: {:?}", body, headers
+    );
+    Ok(())
+}
+
+pub async fn gzip_body() -> Result<()> {
+    let resp = BROWSER
+        .get(format!("{}/gzip", base()))
+        .send()
+        .await?
+        .error_for_status()?;
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await?;
+    println!("[*] body: {:?} headers: {:?}", body, headers);
+
+
+    ensure!(
+        body.as_ref() == TEST_PAYLOAD,
+        "Abnormal response body: {:?} headers: {:?}", body, headers
+    );
+    Ok(())
+}
+
+pub async fn deflate_body() -> Result<()> {
+    let resp = BROWSER
+        .get(format!("{}/deflate", base()))
+        .send()
+        .await?
+        .error_for_status()?;
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await?;
+    println!("[*] body: {:?} headers: {:?}", body, headers);
+
+
+    ensure!(
+        body.as_ref() == TEST_PAYLOAD,
+        "Abnormal response body: {:?} headers: {:?}", body, headers
+    );
+    Ok(())
+}
+
+pub async fn br_body() -> Result<()> {
+    let resp = BROWSER
+        .get(format!("{}/br", base()))
+        .send()
+        .await?
+        .error_for_status()?;
+    let headers = resp.headers().clone();
+    let body = resp.bytes().await?;
+    println!("[*] body: {:?} headers: {:?}", body, headers);
+
+    ensure!(
+        body.as_ref() == TEST_PAYLOAD,
         "Abnormal response body: {:?} headers: {:?}", body, headers
     );
     Ok(())

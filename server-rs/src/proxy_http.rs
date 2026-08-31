@@ -1,8 +1,8 @@
 // server-rs：HTTP/HTTPS 流式加密代理（/api/{version}/{target}）。
 use axum::body::{Body, Bytes};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
-use axum::extract::{Path, Request, State};
 use futures_util::stream::{LocalBoxStream, Stream};
 use futures_util::StreamExt;
 use std::io::Write;
@@ -52,14 +52,17 @@ pub(crate) async fn proxy(
 ) -> Result<Response, (StatusCode, String)> {
     lib::debug!("start");
 
-    let experimental = state.env.var("experimental")
+    let experimental = state
+        .env
+        .var("experimental")
         .map(|v| v.to_string())
         .map_or(false, |v| {
             let s = v.trim();
-            s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("1") ||
-                s.eq_ignore_ascii_case("use") || s.eq_ignore_ascii_case("enable")
+            s.eq_ignore_ascii_case("true")
+                || s.eq_ignore_ascii_case("1")
+                || s.eq_ignore_ascii_case("use")
+                || s.eq_ignore_ascii_case("enable")
         });
-
 
     let key16 = state.keys.key16;
     let key32 = state.keys.key32;
@@ -85,7 +88,12 @@ pub(crate) async fn proxy(
         match incoming.next().await {
             Some(Ok(b)) => parser.push(&b),
             Some(Err(_)) => return Err(error!(BAD_REQUEST, "request body read error")),
-            None => return Err(error!(BAD_REQUEST, "request body truncated (no head frame)")),
+            None => {
+                return Err(error!(
+                    BAD_REQUEST,
+                    "request body truncated (no head frame)"
+                ))
+            }
         }
     };
 
@@ -95,13 +103,18 @@ pub(crate) async fn proxy(
     if data.is_empty() {
         return Err(error!(BAD_REQUEST, "Unprocessable Request"));
     }
-    let protocol = if data[data.len() - 1] % 2 == 0 { "http" } else { "https" };
+    let protocol = if data[data.len() - 1] % 2 == 0 {
+        "http"
+    } else {
+        "https"
+    };
 
     let head = parse_head(&data[..data.len() - 1])
         .map_err(|_| error!(BAD_REQUEST, "Unprocessable Request"))?;
 
     // HTTP/1.1 请求必须携带 Host；absolute-form 的 request-target 自带权威信息
-    let is_absolute_form = head.target.starts_with("http://") || head.target.starts_with("https://");
+    let is_absolute_form =
+        head.target.starts_with("http://") || head.target.starts_with("https://");
     if head.host.is_none() && !is_absolute_form {
         return Err(error!(BAD_REQUEST, "Missing Host header"));
     }
@@ -141,7 +154,13 @@ pub(crate) async fn proxy(
 
     // ---------- 构造并发出上游请求 ----------
     let mut init = worker::RequestInit::new();
-    lib::debug!("{:<7} {:<15.30} {:<15.30} content_length:{:?} buffer_mode:{buffer_mode}", head.method, head.host.unwrap_or("unknown"), head.target, content_length);
+    lib::debug!(
+        "{:<7} {:<15.30} {:<15.30} content_length:{:?} buffer_mode:{buffer_mode}",
+        head.method,
+        head.host.unwrap_or("unknown"),
+        head.target,
+        content_length
+    );
 
     let method = match head.method {
         "GET" => worker::Method::Get,
@@ -159,14 +178,26 @@ pub(crate) async fn proxy(
     let fetch_headers = worker::Headers::new();
     for (k, v) in head.headers.iter() {
         if [
-            "host", "content-length", "transfer-encoding", "expect",
-            "connection", "keep-alive", "proxy-connection", "proxy-authorization",
-            "te", "trailer", "upgrade",
-            "via", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
-            "cf-worker"
+            "host",
+            "content-length",
+            "transfer-encoding",
+            "expect",
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "upgrade",
+            "via",
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "cf-worker",
         ]
-            .iter()
-            .any(|&h| k.eq_ignore_ascii_case(h))
+        .iter()
+        .any(|&h| k.eq_ignore_ascii_case(h))
         {
             continue;
         }
@@ -176,7 +207,7 @@ pub(crate) async fn proxy(
     }
     init.with_headers(fetch_headers);
 
-    if method != worker::Method::Head && method != worker::Method::Get  {
+    if method != worker::Method::Head && method != worker::Method::Get {
         if buffer_mode {
             let expect = content_length.unwrap_or(0) as usize;
             let mut buf: Vec<u8> = Vec::with_capacity(expect);
@@ -193,13 +224,21 @@ pub(crate) async fn proxy(
                             loop {
                                 match parser.try_pop() {
                                     Ok(Frame::Frame(f)) => {
-                                        let raw = decode_chunk(&f, compressor, aead, &key16, &key32)
-                                            .map_err(|e| error!(BAD_REQUEST, "decode body frame failed: {}", e))?;
+                                        let raw =
+                                            decode_chunk(&f, compressor, aead, &key16, &key32)
+                                                .map_err(|e| {
+                                                    error!(
+                                                        BAD_REQUEST,
+                                                        "decode body frame failed: {}", e
+                                                    )
+                                                })?;
                                         buf.extend_from_slice(&raw);
                                     }
                                     Ok(Frame::Eos) => break 'drain,
                                     Ok(Frame::None) => break,
-                                    Err(e) => return Err(error!(BAD_REQUEST, "frame error: {}", e)),
+                                    Err(e) => {
+                                        return Err(error!(BAD_REQUEST, "frame error: {}", e))
+                                    }
                                 }
                             }
                         }
@@ -252,8 +291,12 @@ pub(crate) async fn proxy(
                     }
                 }
             };
-            let body = worker::Body::from_stream(upstream_body)
-                .map_err(|e| error!(INTERNAL_SERVER_ERROR, "build upstream body stream failed: {:?}", e))?;
+            let body = worker::Body::from_stream(upstream_body).map_err(|e| {
+                error!(
+                    INTERNAL_SERVER_ERROR,
+                    "build upstream body stream failed: {:?}", e
+                )
+            })?;
             if let Some(stream) = body.into_inner() {
                 init.with_body(Some(stream.into()));
             }
@@ -271,8 +314,12 @@ pub(crate) async fn proxy(
             .map_err(|_| error!(BAD_REQUEST, "Unprocessable Request"))?
     };
 
-    let outbound = worker::Request::new_with_init(&full_url, &init)
-        .map_err(|e| error!(INTERNAL_SERVER_ERROR, "build upstream request failed: {:?}", e))?;
+    let outbound = worker::Request::new_with_init(&full_url, &init).map_err(|e| {
+        error!(
+            INTERNAL_SERVER_ERROR,
+            "build upstream request failed: {:?}", e
+        )
+    })?;
 
     // Fetch不像cloudflare:sockets 的 connect受到限制无法连接使用了cf服务的站点，能够解锁更多内容
     let upstream_resp = Fetch::Request(outbound)
@@ -288,7 +335,9 @@ pub(crate) async fn proxy(
     let body_stream: LocalBoxStream<'static, Result<Vec<u8>, worker::Error>> =
         match upstream_resp.into_parts().1 {
             worker::ResponseBody::Stream(s) => Box::pin(worker::ByteStream::from(s)),
-            worker::ResponseBody::Body(bytes) => Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
+            worker::ResponseBody::Body(bytes) => {
+                Box::pin(futures_util::stream::once(async move { Ok(bytes) }))
+            }
             worker::ResponseBody::Empty => Box::pin(futures_util::stream::empty()),
         };
 
@@ -296,136 +345,139 @@ pub(crate) async fn proxy(
     let aead = aead;
 
     let stream = async_stream::stream! {
-    let mut body_stream = body_stream;
+        let mut body_stream = body_stream;
 
-    let mut content_length_zero = false;
-    let mut is_sse = false; // 用于判断是否为 Server-Sent Events
+        let mut content_length_zero = false;
+        let mut is_sse = false; // 用于判断是否为 Server-Sent Events
 
-    let mut head_buf = Vec::with_capacity(512);
-    let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));
+        let mut head_buf = Vec::with_capacity(512);
+        let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));
 
-    for (k, v) in resp_headers.iter() {
-        if ["content-length", "transfer-encoding", "content-encoding"]
-            .iter()
-            .any(|&h| k.eq_ignore_ascii_case(h))
-        {
-            if k.eq_ignore_ascii_case("content-length") && v.trim() == "0" {
-                content_length_zero = true;
-            }
-            continue;
-        }
-        if k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream") {
-            is_sse = true;
-        }
-        let _ = write!(&mut head_buf, "{}: {}\r\n", k, v);
-    }
-
-    let is_informational = status >= 100 && status < 200;
-    let body_allowed = !is_head
-        && status != 204
-        && status != 304
-        && !is_informational
-        && !content_length_zero;
-
-    let use_chunked = body_allowed;
-
-    if use_chunked {
-        head_buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-    }
-    head_buf.extend_from_slice(b"\r\n");
-
-    // 发送 Header 帧
-    match pack_frame(&head_buf, compressor, aead, &key16, &key32) {
-        Ok(frame) => yield Ok(Bytes::from(frame)),
-        Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
-    }
-
-    if body_allowed {
-        const BUFFER_THRESHOLD: usize = 16 * 1024;
-        let threshold = if is_sse { 0 } else { BUFFER_THRESHOLD };
-
-        let mut buffer = Vec::with_capacity(BUFFER_THRESHOLD);
-
-
-        let flush_buffer = |buf: &mut Vec<u8>| -> Result<Bytes, String> {
-            if buf.is_empty() {
-                return Ok(Bytes::new());
-            }
-            let framed = if use_chunked {
-                let mut chunk_buf = Vec::with_capacity(buf.len() + 20);
-                let _ = write!(&mut chunk_buf, "{:x}\r\n", buf.len());
-                chunk_buf.extend_from_slice(buf);
-                chunk_buf.extend_from_slice(b"\r\n");
-                chunk_buf
-            } else {
-                buf.clone()
-            };
-
-            buf.clear();
-
-            pack_frame(&framed, compressor, aead, &key16, &key32)
-                .map(Bytes::from)
-        };
-
-        loop {
-            let bytes = match body_stream.next().await {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => { yield Err(std::io::Error::other(format!("{e:?}"))); return; }
-                None => break, // EOF
-            };
-
-            if bytes.is_empty() {
+        for (k, v) in resp_headers.iter() {
+            if ["content-length", "transfer-encoding"]
+                .iter()
+                .any(|&h| k.eq_ignore_ascii_case(h))
+            {
+                if k.eq_ignore_ascii_case("content-length") && v.trim() == "0" {
+                    content_length_zero = true;
+                }
                 continue;
             }
+            if k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream") {
+                is_sse = true;
+            }
+            if k.eq_ignore_ascii_case("content-encoding") && (v.contains("gzip") || v.contains("br")){    // gzip,br会自动解压
+                continue;
+            }
+            let _ = write!(&mut head_buf, "{}: {}\r\n", k, v);
+        }
 
-            if buffer.is_empty() && bytes.len() >= threshold {
+        let is_informational = status >= 100 && status < 200;
+        let body_allowed = !is_head
+            && status != 204
+            && status != 304
+            && !is_informational
+            && !content_length_zero;
+
+        let use_chunked = body_allowed;
+
+        if use_chunked {
+            head_buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+        }
+        head_buf.extend_from_slice(b"\r\n");
+
+        // 发送 Header 帧
+        match pack_frame(&head_buf, compressor, aead, &key16, &key32) {
+            Ok(frame) => yield Ok(Bytes::from(frame)),
+            Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
+        }
+
+        if body_allowed {
+            const BUFFER_THRESHOLD: usize = 16 * 1024;
+            let threshold = if is_sse { 0 } else { BUFFER_THRESHOLD };
+
+            let mut buffer = Vec::with_capacity(BUFFER_THRESHOLD);
+
+
+            let flush_buffer = |buf: &mut Vec<u8>| -> Result<Bytes, String> {
+                if buf.is_empty() {
+                    return Ok(Bytes::new());
+                }
                 let framed = if use_chunked {
-                    let mut chunk_buf = Vec::with_capacity(bytes.len() + 20);
-                    let _ = write!(&mut chunk_buf, "{:x}\r\n", bytes.len());
-                    chunk_buf.extend_from_slice(&bytes);
+                    let mut chunk_buf = Vec::with_capacity(buf.len() + 20);
+                    let _ = write!(&mut chunk_buf, "{:x}\r\n", buf.len());
+                    chunk_buf.extend_from_slice(buf);
                     chunk_buf.extend_from_slice(b"\r\n");
                     chunk_buf
                 } else {
-                    bytes.to_vec()
+                    buf.clone()
                 };
 
-                match pack_frame(&framed, compressor, aead, &key16, &key32) {
-                    Ok(frame) => yield Ok(Bytes::from(frame)),
-                    Err(e) => { yield Err(std::io::Error::other(format!("pack error: {e}"))); return; }
+                buf.clear();
+
+                pack_frame(&framed, compressor, aead, &key16, &key32)
+                    .map(Bytes::from)
+            };
+
+            loop {
+                let bytes = match body_stream.next().await {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => { yield Err(std::io::Error::other(format!("{e:?}"))); return; }
+                    None => break, // EOF
+                };
+
+                if bytes.is_empty() {
+                    continue;
                 }
-                continue;
+
+                if buffer.is_empty() && bytes.len() >= threshold {
+                    let framed = if use_chunked {
+                        let mut chunk_buf = Vec::with_capacity(bytes.len() + 20);
+                        let _ = write!(&mut chunk_buf, "{:x}\r\n", bytes.len());
+                        chunk_buf.extend_from_slice(&bytes);
+                        chunk_buf.extend_from_slice(b"\r\n");
+                        chunk_buf
+                    } else {
+                        bytes.to_vec()
+                    };
+
+                    match pack_frame(&framed, compressor, aead, &key16, &key32) {
+                        Ok(frame) => yield Ok(Bytes::from(frame)),
+                        Err(e) => { yield Err(std::io::Error::other(format!("pack error: {e}"))); return; }
+                    }
+                    continue;
+                }
+
+                buffer.extend_from_slice(&bytes);
+
+                if buffer.len() >= threshold {
+                    match flush_buffer(&mut buffer) {
+                        Ok(bytes) if bytes.is_empty() => {},
+                        Ok(bytes) => yield Ok(bytes),
+                        Err(e) => { yield Err(std::io::Error::other(e)); return; }
+                    }
+                }
             }
 
-            buffer.extend_from_slice(&bytes);
-
-            if buffer.len() >= threshold {
-                match flush_buffer(&mut buffer) {
-                    Ok(bytes) if bytes.is_empty() => {},
-                    Ok(bytes) => yield Ok(bytes),
+            if !buffer.is_empty() {
+                 match flush_buffer(&mut buffer) {
+                    Ok(bytes) if !bytes.is_empty() => yield Ok(bytes),
                     Err(e) => { yield Err(std::io::Error::other(e)); return; }
+                    _ => {}
+                }
+            }
+
+            if use_chunked {
+                let tail = b"0\r\n\r\n";
+                match pack_frame(tail, compressor, aead, &key16, &key32) {
+                    Ok(frame) => yield Ok(Bytes::from(frame)),
+                    Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
                 }
             }
         }
 
-        if !buffer.is_empty() {
-             match flush_buffer(&mut buffer) {
-                Ok(bytes) if !bytes.is_empty() => yield Ok(bytes),
-                Err(e) => { yield Err(std::io::Error::other(e)); return; }
-                _ => {}
-            }
-        }
-
-        if use_chunked {
-            let tail = b"0\r\n\r\n";
-            match pack_frame(tail, compressor, aead, &key16, &key32) {
-                Ok(frame) => yield Ok(Bytes::from(frame)),
-                Err(e) => { yield Err(std::io::Error::other(format!("pack frame failed: {e}"))); return; }
-            }
-        }
-    }
-
-    yield Ok(Bytes::from(make_frame(b"")));
-};
+        yield Ok(Bytes::from(make_frame(b"")));
+    };
 
     let stream = SendStream(Box::pin(stream));
     let resp = Response::builder()
