@@ -113,8 +113,8 @@ pub async fn check_proxy_availability(port: u16) -> Result<ProxyCheck> {
 fn base_client_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
-        .no_proxy() // 核心：防止走系统代理产生死循环
-        .pool_max_idle_per_host(256) // [优化] 从 512 调低至 256，防止内存较小设备的文件描述符(FD)耗尽
+        .no_proxy()
+        .pool_max_idle_per_host(384)
         .pool_idle_timeout(Duration::from_secs(360))
         .tcp_keepalive(Duration::from_secs(60))
         .tcp_nodelay(true);

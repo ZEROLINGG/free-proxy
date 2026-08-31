@@ -16,6 +16,11 @@ pub static BROWSER: LazyLock<Client> = LazyLock::new(|| {
         .danger_accept_invalid_certs(true)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(600))
+        .pool_max_idle_per_host(384)
+        .pool_idle_timeout(Duration::from_secs(360))
+        .tcp_keepalive(Duration::from_secs(60))
+        .http2_initial_stream_window_size(2 * 1024 * 1024)
+        .http2_initial_connection_window_size(16 * 1024 * 1024)
         .build()
         .unwrap()
 });

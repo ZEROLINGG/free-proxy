@@ -330,7 +330,7 @@ pub(crate) async fn proxy(
 
     let status: u16 = upstream_resp.status_code();
     let resp_headers: Vec<(String, String)> = upstream_resp.headers().entries().collect();
-    let is_head = method == worker::Method::Head;
+    lib::warn!("[upstream_resp raw]: status:{} headers: {:?}", status, resp_headers.iter().take(8));
 
     let body_stream: LocalBoxStream<'static, Result<Vec<u8>, worker::Error>> =
         match upstream_resp.into_parts().1 {
@@ -373,7 +373,7 @@ pub(crate) async fn proxy(
         }
 
         let is_informational = status >= 100 && status < 200;
-        let body_allowed = !is_head
+        let body_allowed = method != worker::Method::Head
             && status != 204
             && status != 304
             && !is_informational

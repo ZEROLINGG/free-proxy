@@ -132,12 +132,13 @@ log = "debug"
                         && !line.contains("All rights reserved.")
                         && !line.contains("Install the latest PowerShell for new features and improvements!")
                         && !line.contains("https://aka.ms/PSWindows")
-                        && !(line.starts_with("PS ") && line.contains(">"))
+                        && !(line != "PS >")
+                        && !(line != "$")
                         && !line.contains("Loading personal and system profiles took")
 
                     {
                         if line.contains("444 [ERROR]:server-dev 444") {
-                            eprintln!("\x1b[1;31m[ERROR]wrangler crashed abnormally!!!\x1b[0m");
+                            println!("\x1b[1;31m[ERROR]wrangler crashed abnormally!!!\x1b[0m");
                             // 设置崩溃标志
                             flag.store(true, Ordering::SeqCst);
                         } else {
