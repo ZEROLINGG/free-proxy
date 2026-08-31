@@ -352,7 +352,7 @@ pub(crate) async fn proxy(
         let mut body_stream = body_stream;
 
         let mut content_length_zero = false;
-        let mut is_sse = false; // 用于判断是否为 Server-Sent Events
+        let mut is_sse = false;
 
         let mut head_buf = Vec::with_capacity(512);
         let _ = write!(&mut head_buf, "HTTP/1.1 {} {}\r\n", status, status_text(status));

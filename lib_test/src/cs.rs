@@ -132,8 +132,8 @@ ansi_log = "true"
                         && !line.contains("All rights reserved.")
                         && !line.contains("Install the latest PowerShell for new features and improvements!")
                         && !line.contains("https://aka.ms/PSWindows")
-                        && !(line == "PS > ")
-                        && !(line == "$ ")
+                        && !(line == "PS >")
+                        && !(line == "$")
                         && !(line.contains("sh-") && line.contains("$"))
                         && !line.contains("Loading personal and system profiles took")
 
