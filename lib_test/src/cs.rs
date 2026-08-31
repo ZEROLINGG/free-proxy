@@ -102,7 +102,6 @@ ansi_log = "true"
             .work_dir(Self::project_root()?.join("server-rs"))
             .disable_snapshot()
             .line_callback()
-            .init_input(" \n")
             .on_output(move |line| {
                 let flag = crash_flag_clone.clone();
                 async move {
@@ -122,7 +121,6 @@ ansi_log = "true"
                         && !line.contains("╰───────────────────────────╯")
                         && !line.contains("Starting local server...")
                         && !line.contains("Local package.json exists, but node_modules missing, did you mean to install?")
-                        && !(line.contains("bash") && line.contains("$"))
                         && !(line.contains("> @ server-dev ") && line.contains("free-proxy"))
                         && !line.contains("> cd server-rs && wrangler dev")
                         && !line.contains("If you think this is a bug then please create an issue at")
@@ -136,6 +134,7 @@ ansi_log = "true"
                         && !line.contains("https://aka.ms/PSWindows")
                         && !(line == "PS > ")
                         && !(line == "$ ")
+                        && !(line.contains("sh-") && line.contains("$"))
                         && !line.contains("Loading personal and system profiles took")
 
                     {
@@ -175,7 +174,7 @@ ansi_log = "true"
             if let Some(child) = self.child.as_mut() {
                 child.reset().await?;
                 child
-                    .send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
+                    .send_line(r#"wrangler dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
                     .await?;
                 // 重启后重置崩溃标志
                 if let Some(flag) = &self.crash_flag {
