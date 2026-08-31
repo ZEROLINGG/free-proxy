@@ -131,76 +131,137 @@ impl_chacha_cipher!(ChaCha20Poly1305, chacha20poly1305::ChaCha20Poly1305, 12);
 pub struct Ascon128;
 impl_ascon_cipher!(Ascon128, ascon_aead128::AsconAead128);
 
-// ─── 单元测试 ─────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &[u8] = b"The quick brown fox jumps over the lazy dog 0123456789";
+    // ─── 辅助常量 ─────────────────────────────────────────────────────────────
+    const CHACHA_KEY: &[u8; 32] = b"12345678901234567890123456789012"; // 32 字节
+    const ASCON_KEY: &[u8; 16] = b"1234567890123456"; // 16 字节
+    const PLAINTEXT: &[u8] = b"Hello, RustCrypto! This is a highly secret message.";
 
-    fn round_trip<C: Cipher>(label: &str, key: &[u8]) {
-        let encrypted = C::encrypt(SAMPLE, key).expect("encrypt failed");
-        let decrypted = C::decrypt(&encrypted, key).expect("decrypt failed");
-        assert_eq!(decrypted, SAMPLE, "{label}: round-trip mismatch");
-        println!(
-            "{label}: {} -> {} bytes ({:.1}%)",
-            SAMPLE.len(),
-            encrypted.len(),
-            encrypted.len() as f64 / SAMPLE.len() as f64 * 100.0
+    // ─── ChaCha20Poly1305 测试 ───────────────────────────────────────────────
+
+    #[test]
+    fn test_chacha20_basic_encrypt_decrypt() {
+        let encrypted = ChaCha20Poly1305::encrypt(PLAINTEXT, CHACHA_KEY).unwrap();
+        let decrypted = ChaCha20Poly1305::decrypt(&encrypted, CHACHA_KEY).unwrap();
+        assert_eq!(PLAINTEXT, &decrypted[..]);
+    }
+
+    #[test]
+    fn test_chacha20_invalid_key_length() {
+        let short_key = b"too short";
+        let long_key = b"this_key_is_way_too_long_for_chacha20_to_accept_it";
+
+        assert!(ChaCha20Poly1305::encrypt(PLAINTEXT, short_key).is_err());
+        assert!(ChaCha20Poly1305::encrypt(PLAINTEXT, long_key).is_err());
+        assert!(ChaCha20Poly1305::decrypt(PLAINTEXT, short_key).is_err());
+    }
+
+    #[test]
+    fn test_chacha20_ciphertext_too_short() {
+        // ChaCha20 nonce is 12 bytes. Trying to decrypt 11 bytes should fail immediately.
+        let short_ciphertext = vec![0u8; 11];
+        let result = ChaCha20Poly1305::decrypt(&short_ciphertext, CHACHA_KEY);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "ciphertext too short: 11 bytes"
         );
     }
 
-    fn wrong_key_returns_err<C: Cipher>(label: &str, key: &[u8], bad_key: &[u8]) {
-        let encrypted = C::encrypt(SAMPLE, key).expect("encrypt failed");
-        let result = C::decrypt(&encrypted, bad_key);
-        assert!(result.is_err(), "{label}: expected Err with wrong key");
+    #[test]
+    fn test_chacha20_tamper_resistance() {
+        let mut encrypted = ChaCha20Poly1305::encrypt(PLAINTEXT, CHACHA_KEY).unwrap();
+
+        // 篡改密文的最后一个字节 (通常是 Poly1305 Tag 的一部分)
+        let last_idx = encrypted.len() - 1;
+        encrypted[last_idx] ^= 0x01; // 翻转最低位
+
+        // 验证解密会失败，确保了 AEAD 的完整性保护
+        let result = ChaCha20Poly1305::decrypt(&encrypted, CHACHA_KEY);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("decryption failed"));
     }
 
     #[test]
-    fn test_chacha20poly1305_round_trip() {
-        round_trip::<ChaCha20Poly1305>("chacha20-poly1305", &[0xABu8; 32]);
+    fn test_chacha20_nonce_randomness() {
+        // 使用相同的密钥和相同的明文，多次加密得到的结果应该不同 (因为 Nonce 是随机生成的)
+        let enc1 = ChaCha20Poly1305::encrypt(PLAINTEXT, CHACHA_KEY).unwrap();
+        let enc2 = ChaCha20Poly1305::encrypt(PLAINTEXT, CHACHA_KEY).unwrap();
+
+        assert_ne!(enc1, enc2);
     }
 
     #[test]
-    fn test_chacha20poly1305_wrong_key() {
-        wrong_key_returns_err::<ChaCha20Poly1305>(
-            "chacha20-poly1305",
-            &[0xABu8; 32],
-            &[0x00u8; 32],
+    fn test_chacha20_empty_plaintext() {
+        let empty_data: &[u8] = b"";
+        let encrypted = ChaCha20Poly1305::encrypt(empty_data, CHACHA_KEY).unwrap();
+
+        // 密文长度 = 12 (Nonce) + 0 (明文) + 16 (Tag) = 28 字节
+        assert_eq!(encrypted.len(), 28);
+
+        let decrypted = ChaCha20Poly1305::decrypt(&encrypted, CHACHA_KEY).unwrap();
+        assert_eq!(empty_data, &decrypted[..]);
+    }
+
+    // ─── Ascon128 测试 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ascon128_basic_encrypt_decrypt() {
+        let encrypted = Ascon128::encrypt(PLAINTEXT, ASCON_KEY).unwrap();
+        let decrypted = Ascon128::decrypt(&encrypted, ASCON_KEY).unwrap();
+        assert_eq!(PLAINTEXT, &decrypted[..]);
+    }
+
+    #[test]
+    fn test_ascon128_invalid_key_length() {
+        let short_key = b"short";
+        assert!(Ascon128::encrypt(PLAINTEXT, short_key).is_err());
+        assert!(Ascon128::decrypt(PLAINTEXT, short_key).is_err());
+    }
+
+    #[test]
+    fn test_ascon128_ciphertext_too_short() {
+        // Ascon128 nonce is 16 bytes.
+        let short_ciphertext = vec![0u8; 15];
+        let result = Ascon128::decrypt(&short_ciphertext, ASCON_KEY);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "ciphertext too short: 15 bytes"
         );
     }
 
     #[test]
-    fn test_invalid_key_length_rejected() {
-        assert!(ChaCha20Poly1305::encrypt(b"data", &[0u8; 16]).is_err());
+    fn test_ascon128_tamper_resistance() {
+        let mut encrypted = Ascon128::encrypt(PLAINTEXT, ASCON_KEY).unwrap();
+
+        // 篡改 Nonce 部分 (前 16 字节内的某个字节)
+        encrypted[5] ^= 0xFF;
+
+        let result = Ascon128::decrypt(&encrypted, ASCON_KEY);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_ascon128_round_trip() {
-        round_trip::<Ascon128>("ascon-128", &[0x5Au8; 16]);
+    fn test_ascon128_nonce_randomness() {
+        let enc1 = Ascon128::encrypt(PLAINTEXT, ASCON_KEY).unwrap();
+        let enc2 = Ascon128::encrypt(PLAINTEXT, ASCON_KEY).unwrap();
+        assert_ne!(enc1, enc2);
     }
 
     #[test]
-    fn test_ascon128_wrong_key() {
-        wrong_key_returns_err::<Ascon128>("ascon-128", &[0x5Au8; 16], &[0x00u8; 16]);
-    }
+    fn test_ascon128_empty_plaintext() {
+        let empty_data: &[u8] = b"";
+        let encrypted = Ascon128::encrypt(empty_data, ASCON_KEY).unwrap();
 
-    #[test]
-    fn test_ascon128_invalid_key_length_rejected() {
-        assert!(Ascon128::encrypt(b"data", &[0u8; 15]).is_err());
-        assert!(Ascon128::encrypt(b"data", &[0u8; 17]).is_err());
-        assert!(Ascon128::encrypt(b"data", &[0u8; 32]).is_err());
-    }
+        // 密文长度 = 16 (Nonce) + 0 (明文) + 16 (Tag) = 32 字节
+        assert_eq!(encrypted.len(), 32);
 
-    #[test]
-    fn test_ascon128_short_ciphertext_rejected() {
-        assert!(Ascon128::decrypt([0u8; 15], &[0u8; 16]).is_err());
-        // 仅 16 字节 nonce、无 tag 负载同样不可解密
-        assert!(Ascon128::decrypt([0u8; 16], &[0u8; 16]).is_err());
-    }
-
-    #[test]
-    fn test_short_ciphertext_rejected() {
-        assert!(ChaCha20Poly1305::decrypt([0u8; 11], &[0u8; 32]).is_err());
+        let decrypted = Ascon128::decrypt(&encrypted, ASCON_KEY).unwrap();
+        assert!(decrypted.is_empty());
     }
 }

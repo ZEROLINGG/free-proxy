@@ -21,7 +21,7 @@ CLI and GUI deliberately share one config/CA directory (`app_data_dir/com.zz.fre
 Annotated map of source dirs (build/runtime dirs like `target/`, `.wrangler/`, `icons/`, `image/`, `logs/` are omitted):
 
 ```
-├── package.json                  # root npm scripts (server-dev/deploy, client-dev, test-e2e)
+├── package.json                  # root npm scripts (server-dev/deploy, client-dev, test-lib, test-e2e)
 ├── deny.toml                     # cargo-deny shared config (all 4 crates read it)
 ├── .github/workflows/release.yml # tag-triggered release CI (desktop + CLI + Worker zip; Android job commented out)
 ├── lib/src/                      # shared protocol core — compiles for native AND wasm32
@@ -114,11 +114,12 @@ From repo root (see `package.json`):
 - `npm run server-dev` — local Worker via wrangler; binds **port 80**, reads secrets from `server-rs/.dev.vars` (gitignored: `key`, `domain`)
 - `npm run server-deploy` — deploy Worker to Cloudflare
 - `npm run client-dev` / `npm run client-android-dev` — Tauri desktop / Android dev
+- `npm run test-lib` — run `lib` crate unit tests from the repo root (equivalent to `cd lib && cargo test`)
 - `npm run test-e2e` — run the `lib_test` E2E harness
 
 Per-crate:
 
-- Unit tests: from inside `lib/`, `cargo test` (~110 offline tests incl. client↔server contract/roundtrip tests, ~20 s). README's `cargo test -p lib` also only works from inside `lib/`. 
+- Unit tests: from inside `lib/`, `cargo test` (110+ offline tests incl. client↔server contract/roundtrip tests, ~20 s). README's `npm run test-lib` also only works from inside `lib/`.
 - E2E harness: `cd lib_test && cargo run` — self-hosted full-chain test (Worker on 80, proxy client on 18081, target site on 18082); needs pnpm + free port 80 + internet, and **rewrites `server-rs/.dev.vars` with a random key** (restore your own dev secrets afterwards if needed). Runs all 46 cases; exits non-zero unless every function classifies as 稳定成功/不稳定成功.
 - Wasm-side check of shared lib: `cd lib && cargo check --no-default-features --features server`
 - Security audit (run per crate; shared config at repo-root `deny.toml`): `cargo deny check licenses advisories` + `cargo audit`. Advisory ignores live in `deny.toml [advisories]` with justifications — review them when bumping `postcard`, `tauri`, or the gtk/wry stack.
@@ -140,19 +141,15 @@ Per-crate:
 - `server-rs/wrangler.toml` sets `compatibility_flags = ["no_websocket_standard_binary_type"]`. Do not remove or "upgrade" this: worker crate 0.8 requires ArrayBuffer WS messages, and the modern default (compat date ≥ 2026-03-17) delivers Blobs, which silently empties WS tunnel frames. See comment in that file and upstream fix https://github.com/cloudflare/workers-rs/pull/1049 .
 - Secrets (`key`, `domain`) live in Cloudflare Worker secrets / `.dev.vars`. Never commit `.dev.vars*`, `*.pem`, `*.key`, etc. (all gitignored).
 
-## Documentation Sync (README.md)
+## Documentation Sync (README.md && AGENTS.md)
 
-**MANDATORY RULE:** The root `README.md` is the face of the project. You MUST proactively review and update it in the same context if your changes trigger any of the following conditions:
+**Mandatory Rules:** The `README.md` and `AGENTS.md` files in the root directory are the project's facade and must accurately describe the project. If your changes trigger any of the following conditions, you must actively review and update them within the same context:
+1. Add or remove some features
+2. Modifying npm/Cargo commands in `package.json`
+3. Add directories and files
+4. Modify module organization method
+5. Core protocol changed
+6. Changes to default parameters
+7. ……
 
-1. **UX & Feature Changes:**
-  - Modifying CLI arguments (`client_cli/src/main.rs` or `clap` structs).
-  - Proxy architecture change.
-  - Add new features.
-  - Changing API endpoints, subscription logic, or supported proxy protocols.
-2. **Setup & Architecture Changes:**
-  - Modifying npm/Cargo commands in `package.json`.
-  - Changing default ports (e.g., Worker port 80, local proxy port 18081).
-  - Adding a new directory or crate.
-3. **Large-scale Refactoring:** Any change touching >5 files or altering the core data flow.
-
-**Agent Self-Check Prompt:** Before finishing a task, ask yourself: *"Does this code change make the current `README.md` obsolete, inaccurate, or missing new instructions?"* If yes, update `README.md` immediately. **Remember: Keep the README updates in Chinese.**
+**Proxy Self-Check Prompt:** Before completing the task, please ask yourself: *“Will this code change cause the current `README.md` and `AGENTS.md` files to become outdated, inaccurate, or lack new instructions?”* If so, please update the `README.md` and `AGENTS.md` files immediately. **Note:** The updated content in `README.md` should be in Chinese. The updated content in `AGENTS.md` should be in English.

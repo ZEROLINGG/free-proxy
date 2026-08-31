@@ -45,7 +45,7 @@ where
         parser.push(&remaining)?;
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(32);
     let key16 = shared.key16;
     let key32 = shared.key32;
     let body_stream = async_stream::stream! {

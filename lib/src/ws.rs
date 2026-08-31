@@ -503,3 +503,202 @@ impl WsTunnelMsg {
             .map_err(|e| anyhow!("WsTunnelMsg deserialize failed: {e}"))
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opcode_conversion() {
+        assert_eq!(WsOpCode::try_from(0x1).unwrap(), WsOpCode::Text);
+        assert_eq!(WsOpCode::try_from(0x8).unwrap(), WsOpCode::Close);
+        assert!(WsOpCode::try_from(0x10).is_err()); // 超出范围
+
+        assert!(WsOpCode::Close.is_control());
+        assert!(!WsOpCode::Text.is_control());
+        assert!(WsOpCode::Binary.is_data());
+        assert!(WsOpCode::Reserved3.is_reserved());
+    }
+
+    #[test]
+    fn test_frame_close_info() {
+        let f1 = WsFrame::new_close(None, None);
+        assert_eq!(f1.close_info(), None);
+
+        let f2 = WsFrame::new_close(Some((1000, None)), None);
+        assert_eq!(f2.close_info(), Some((1000, None)));
+
+        let f3 = WsFrame::new_close(Some((1001, Some("going away".to_string()))), None);
+        assert_eq!(
+            f3.close_info(),
+            Some((1001, Some("going away".to_string())))
+        );
+    }
+
+
+    #[test]
+    fn test_frame_roundtrip_short_unmasked() {
+        let original = WsFrame::new_text("hello", None);
+        let bytes = original.clone().to_bytes();
+
+        // 长度分析: FIN+Text(1) + Len=5(1) + payload(5) = 7 字节
+        assert_eq!(bytes.len(), 7);
+
+        let (parsed, consumed) = WsFrame::parse(&bytes).unwrap().unwrap();
+        assert_eq!(consumed, 7);
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_frame_roundtrip_medium_masked() {
+        let payload = vec![0x42; 200];
+        let mask = Some([0x12, 0x34, 0x56, 0x78]);
+        let original = WsFrame::new_binary(payload, mask);
+
+        let bytes = original.clone().to_bytes();
+
+        let (parsed, _consumed) = WsFrame::parse(&bytes).unwrap().unwrap();
+
+        assert_eq!(parsed.payload, original.payload);
+        assert_eq!(parsed.mask_key, mask);
+    }
+
+    #[test]
+    fn test_frame_roundtrip_large_unmasked() {
+        let payload = vec![0x99; 70000];
+        let original = WsFrame::new_binary(payload, None);
+
+        let bytes = original.clone().to_bytes();
+        let (parsed, _) = WsFrame::parse(&bytes).unwrap().unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_parse_partial_data_streaming() {
+        let original = WsFrame::new_text("chunked", Some([1, 2, 3, 4]));
+        let bytes = original.to_bytes();
+
+        for i in 1..bytes.len() {
+            let partial = &bytes[0..i];
+            let result = WsFrame::parse(partial).unwrap();
+            assert!(result.is_none(), "Should need more data at index {}", i);
+        }
+
+        let (parsed, consumed) = WsFrame::parse(&bytes).unwrap().unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(parsed.payload, b"chunked");
+    }
+
+
+
+    // #[test]
+    // fn test_validation_control_frame_rules() {
+    //     let mut f1 = WsFrame::new_ping(vec![], None);
+    //     f1.fin = false;
+    //     assert!(f1.validate().is_err());
+    //
+    //     let f2 = WsFrame::new_ping(vec![0; 126], None);
+    //     assert!(f2.validate().is_err());
+    // }
+
+    #[test]
+    fn test_validation_rsv_bits() {
+        // 未协商扩展的情况下，RSV 位不能为 true
+        let mut f = WsFrame::new_text("test", None);
+        f.rsv1 = true;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn test_validation_close_reason_utf8() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1000u16.to_be_bytes()); // Code
+        payload.extend_from_slice(&[0xFF, 0xFF]); // 非法 UTF-8
+
+        let f = WsFrame {
+            fin: true, rsv1: false, rsv2: false, rsv3: false,
+            opcode: WsOpCode::Close, mask_key: None, payload,
+        };
+        assert!(f.validate().is_err());
+    }
+
+    // ==========================================
+    // 4. WsCache 分片重组 (Fragmentation) 测试
+    // ==========================================
+
+    #[test]
+    fn test_cache_text_fragmentation() {
+        let mut cache = WsCache::new();
+
+        let mut f1 = WsFrame::new_text("Hello ", None);
+        f1.fin = false; // 分片 1
+
+        let mut f2 = WsFrame::new_text("", None);
+        f2.opcode = WsOpCode::Continuation;
+        f2.payload = b"World".to_vec();
+        f2.fin = false; // 分片 2
+
+        let mut f3 = WsFrame::new_text("", None);
+        f3.opcode = WsOpCode::Continuation;
+        f3.payload = b"!".to_vec();
+        f3.fin = true; // 最终分片
+
+        cache.push(f1).unwrap();
+        assert_eq!(cache.try_pop().unwrap(), None); // 未完整
+
+        cache.push(f2).unwrap();
+        assert_eq!(cache.try_pop().unwrap(), None); // 未完整
+
+        cache.push(f3).unwrap();
+
+        // 重组成功
+        match cache.try_pop().unwrap().unwrap() {
+            WsData::Text(s) => assert_eq!(s, "Hello World!"),
+            _ => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_cache_violation_missing_starter() {
+        let mut cache = WsCache::new();
+        let mut f = WsFrame::new_text("", None);
+        f.opcode = WsOpCode::Continuation; // 第一个帧就是 Continuation，违规
+
+        let err = cache.push(f).unwrap_err();
+        assert!(err.to_string().contains("收到无头部的 Continuation"));
+    }
+
+    #[test]
+    fn test_cache_violation_interleaved_data() {
+        let mut cache = WsCache::new();
+        let mut f1 = WsFrame::new_text("start", None);
+        f1.fin = false;
+
+        let f2 = WsFrame::new_binary(vec![1, 2, 3], None);
+
+        cache.push(f1).unwrap();
+        let err = cache.push(f2).unwrap_err();
+        assert!(err.to_string().contains("未结束时，收到了非 Continuation"));
+    }
+
+    #[test]
+    fn test_calc_sec_ws_accept() {
+        // 使用 RFC 6455 中给出的标准握手示例
+        let client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let expected_accept = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+
+        let result = calc_sec_ws_accept(client_key);
+        assert_eq!(result, expected_accept);
+    }
+
+    #[test]
+    fn test_tunnel_msg_serialization() {
+        let msg = WsTunnelMsg::Close(Some((1000, Some("Normal Closure".to_string()))));
+
+        let bytes = msg.serialize().unwrap();
+        let decoded = WsTunnelMsg::deserialize(&bytes).unwrap();
+
+        assert_eq!(msg, decoded);
+    }
+}

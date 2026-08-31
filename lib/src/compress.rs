@@ -109,61 +109,82 @@ impl Compressor for Zstd {
     }
 }
 
-// ====================== Tests ======================
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &[u8] = b"The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. 0123456789";
-
-    fn round_trip<C: Compressor>(label: &str) {
-        let compressed = C::compress(SAMPLE).expect("compress failed");
-        let decompressed = C::decompress(&compressed).expect("decompress failed");
-        assert_eq!(decompressed, SAMPLE, "{label}: round-trip mismatch");
-
-        println!(
-            "{label}: {} -> {} bytes ({:.2}%)",
-            SAMPLE.len(),
-            compressed.len(),
-            compressed.len() as f64 / SAMPLE.len() as f64 * 100.0
-        );
-    }
-
-    #[test]
-    fn test_lz4() {
-        round_trip::<Lz4>("lz4");
-    }
-    #[test]
-    fn test_zstd() {
-        round_trip::<Zstd>("zstd");
-    }
+    const PLAINTEXT: &str = r#"<!doctype html><html lang="zh-CN" dir="ltr"><head><base href="https://translate.google.com/"><link rel="preconnect" href="//www.gstatic.com"><meta name="referrer" content="origin"><script nonce="Q6h-6INOSqtdlu1mLAcGhw">window['ppConfig'] = {productName: 'TranslateWebserverUi', deleteIsEnforced:  true , sealIsEnforced:  true , heartbeatRate:  0.5 , periodicReportingRateMillis:  60000.0 , disableAllReporting:  false };(function(){'use strict';function k(a){var b=0;return function(){return b<a.length?{done:!1,value:a[b++]}:{done:!0}}}function l(a){var b=typeof Symbol!="undefined"&&Symbol.iterator&&a[Symbol.iterator];if(b)return b.call(a);if(typeof a.length=="number")return{next:k(a)};throw Error(String(a)+" is not an iterable or ArrayLike");}var m=typeof Object.defineProperties=="function"?Object.defineProperty:function(a,b,c){if(a==Array.prototype||a==Object.prototype)return a;a[b]=c.value;return a};
+function n(a){a=["object"==typeof globalThis&&globalThis,a,"object"==typeof window&&window,"object"==typeof self&&self,"object"==typeof global&&global];for(var b=0;b<a.length;++b){var c=a[b];if(c&&c.Math==Math)return c}throw Error("Cannot find global object");}var p=n(this);function q(a,b){if(b)a:{var c=p;a=a.split(".");for(var d=0;d<a.length-1;d++){var e=a[d];if(!(e in c))break a;c=c[e]}a=a[a.length-1];d=c[a];b=b(d);b!=d&&b!=null&&m(c,a,{configurable:!0,writable:!0,value:b})}}
+q("Object.is",function(a){return a?a:function(b,c){return b===c?b!==0||1/b===1/c:b!==b&&c!==c}});q("Array.prototype.includes",function(a){return a?a:function(b,c){var d=this;d instanceof String&&(d=String(d));var e=d.length;c=c||0;for(c<0&&(c=Math.max(c+e,0));c<e;c++){var f=d[c];if(f===b||Object.is(f,b))return!0}return!1}});
+q("String.prototype.includes",function(a){return a?a:function(b,c){if(this==null)throw new TypeError("The 'this' value for String.prototype.includes must not be null or undefined");if(b instanceof RegExp)throw new TypeError("First argument to String.prototype.includes must not be a regular expression");return this.indexOf(b,c||0)!==-1}});function r(a,b,c){a("https://csp.withgoogle.com/csp/proto/"+encodeURIComponent(b),JSON.stringify(c))}function t(){var a;if((a=window.ppConfig)==null?0:a.disableAllReporting)return function(){};var b,c,d,e;return(e=(b=window)==null?void 0:(c=b.navigator)==null?void 0:(d=c.sendBeacon)==null?void 0:d.bind(navigator))!=null?e:u}function u(a,b){var c=new XMLHttpRequest;c.open("POST",a);c.send(b)}
+function v(){var a=(w=Object.prototype)==null?void 0:w.__lookupGetter__("__proto__"),b=x,c=y;return function(){var d=a.call(this),e,f,g,h;r(c,b,{type:"ACCESS_GET",origin:(f=window.location.origin)!=null?f:"unknown",report:{className:(g=d==null?void 0:(e=d.constructor)==null?void 0:e.name)!=null?g:"unknown",stackTrace:(h=Error().stack)!=null?h:"unknown"}});return d}}
+function z(){var a=(A=Object.prototype)==null?void 0:A.__lookupSetter__("__proto__"),b=x,c=y;return function(d){d=a.call(this,d);var e,f,g,h;r(c,b,{type:"ACCESS_SET",origin:(f=window.location.origin)!=null?f:"unknown",report:{className:(g=d==null?void 0:(e=d.constructor)==null?void 0:e.name)!=null?g:"unknown",stackTrace:(h=Error().stack)!=null?h:"unknown"}});return d}}function B(a,b){C(a.productName,b);setInterval(function(){C(a.productName,b)},a.periodicReportingRateMillis)}
+var D="constructor __defineGetter__ __defineSetter__ hasOwnProperty __lookupGetter__ __lookupSetter__ isPrototypeOf propertyIsEnumerable toString valueOf __proto__ toLocaleString x_ngfn_x".split(" "),E=D.concat,G=navigator.userAgent.match(/Firefox\/([0-9]+)\./),H=(!G||G.length<2?0:Number(G[1])<75)?["toSource"]:[],I;if(H instanceof Array)I=H;else{for(var J=l(H),K,L=[];!(K=J.next()).done;)L.push(K.value);I=L}var M=E.call(D,I),N=[];
+function C(a,b){var c=[],d=l(Object.getOwnPropertyNames(Object.prototype)),e=d.next(),f;try{for(;!e.done;e=d.next()){var g=e.value;M.includes(g)||N.includes(g)||c.push(g)}}finally{e&&!e.done&&(f=d.return)&&f.call(d)}e=Object.prototype;d=[];for(f=0;f<c.length;f++)g=c[f],d[f]={name:g,descriptor:Object.getOwnPropertyDescriptor(Object.prototype,g),type:typeof e[g]};if(d.length!==0){c=l(d);e=c.next();var h;try{for(;!e.done;e=c.next())N.push(e.value.name)}finally{e&&!e.done&&(h=c.return)&&h.call(c)}var F;
+r(b,a,{type:"SEAL",origin:(F=window.location.origin)!=null?F:"unknown",report:{blockers:d}})}};var O=Math.random(),P=t(),Q=window.ppConfig;Q&&(Q.disableAllReporting||Q.deleteIsEnforced&&Q.sealIsEnforced||O<Q.heartbeatRate&&r(P,Q.productName,{origin:window.location.origin,type:"HEARTBEAT"}));var y=t(),R=window.ppConfig;if(R)if(R.deleteIsEnforced)delete Object.prototype.__proto__;else if(!R.disableAllReporting){var x=R.productName;try{var w,A;Object.defineProperty(Object.prototype,"__proto__",{enumerable:!1,get:v(),set:z()})}catch(a){}}
+(function(){var a=t(),b=window.ppConfig;b&&(b.sealIsEnforced?Object.seal(Object.prototype):b.disableAllReporting||(document.readyState!=="loading"?B(b,a):document.addEventListener("DOMContentLoaded",function(){B(b,a)})))})();}).call(this);"#;
 
 
     #[test]
-    fn test_lz4_bomb_rejected() {
-        let mut compressed = Lz4::compress(SAMPLE).expect("compress failed");
-        // Tamper with the LZ4 size prefix, claiming ~4GB decompressed size.
-        compressed[..4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    fn test_lz4_roundtrip() {
+        let compressed = Lz4::compress(PLAINTEXT).unwrap();
+        let decompressed = Lz4::decompress(&compressed).unwrap();
+        assert_eq!(PLAINTEXT, String::from_utf8(decompressed).unwrap());
+    }
+
+    #[test]
+    fn test_zstd_roundtrip() {
+        let compressed = Zstd::compress(PLAINTEXT).unwrap();
+        let decompressed = Zstd::decompress(&compressed).unwrap();
+        assert_eq!(PLAINTEXT, String::from_utf8(decompressed).unwrap());
+    }
+
+    #[test]
+    fn test_empty_input_roundtrip() {
+        let empty_data: &[u8] = b"";
+
+        let lz4_comp = Lz4::compress(empty_data).unwrap();
+        assert_eq!(empty_data, &Lz4::decompress(&lz4_comp).unwrap()[..]);
+
+        let zstd_comp = Zstd::compress(empty_data).unwrap();
+        assert_eq!(empty_data, &Zstd::decompress(&zstd_comp).unwrap()[..]);
+    }
+
+    #[test]
+    fn test_lz4_too_short_input() {
+        let short_data = b"123";
+        assert!(Lz4::decompress(short_data).is_err());
+    }
+
+    #[test]
+    fn test_zstd_invalid_data() {
+        let invalid_data = b"not a valid zstd frame data";
+        assert!(Zstd::decompress(invalid_data).is_err());
+    }
+
+
+    #[test]
+    fn test_lz4_header_bomb_prevention() {
+        let mut compressed = Lz4::compress(b"small data").unwrap();
+        let fake_size: u32 = 100 * 1024 * 1024;
+        compressed[0..4].copy_from_slice(&fake_size.to_le_bytes());
+
+        let err = Lz4::decompress(&compressed).unwrap_err();
+        assert!(err.to_string().contains("LZ4 decompression bomb detected: declared size"));
+    }
+
+    #[test]
+    fn test_zstd_highly_compressible_bomb_prevention() {
+        let huge_zero_data = vec![0u8; 1024 * 1024];
+        let compressed = Zstd::compress(&huge_zero_data).unwrap();
+
+        assert!(compressed.len() < 200, "Compressed size is {}", compressed.len());
+
+        let err = Zstd::decompress(&compressed).unwrap_err();
         assert!(
-            Lz4::decompress(&compressed).is_err(),
-            "lz4 bomb should be rejected"
+            err.to_string().contains("bomb detected via frame header") ||
+                err.to_string().contains("bomb detected during read"),
+            "Expected bomb detection error, got: {}", err
         );
-    }
-
-    #[test]
-    fn test_zstd_small_round_trip() {
-        assert_eq!(
-            Zstd::decompress(&Zstd::compress(b"tiny").unwrap()).unwrap(),
-            b"tiny"
-        );
-    }
-
-    #[test]
-    fn test_invalid_data_returns_err() {
-        let garbage = b"this is definitely not valid compressed data!!!";
-
-        assert!(Lz4::decompress(garbage).is_err());
-        assert!(Zstd::decompress(garbage).is_err());
     }
 }

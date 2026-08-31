@@ -90,3 +90,109 @@ pub fn derive_ca_key_secret(device_uid: &str, salt: &[u8]) -> anyhow::Result<[u8
 }
 
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_TOKEN_BASE: &[u8; 16] = b"1234567890123456";
+    const BASE_TIME: u64 = 1_600_000_000_000;
+
+
+    #[test]
+    fn test_token_happy_path() {
+        let nonce = 123456789;
+        let token = token_gen(TEST_TOKEN_BASE, BASE_TIME, nonce);
+
+        assert!(!token.is_empty(), "Token should not be empty");
+
+        assert!(token_auth(&token, TEST_TOKEN_BASE, BASE_TIME));
+    }
+
+    #[test]
+    fn test_token_time_window_validation() {
+        let nonce = 987654321;
+        let token = token_gen(TEST_TOKEN_BASE, BASE_TIME, nonce);
+
+        // 测试时间窗口: < 30_000 毫秒 (正负 30 秒)
+
+        // 1. 刚好在窗口内 (未来)
+        assert!(token_auth(&token, TEST_TOKEN_BASE, BASE_TIME + 29_999));
+        // 2. 刚好在窗口外 (未来，拒绝)
+        assert!(!token_auth(&token, TEST_TOKEN_BASE, BASE_TIME + 30_000));
+
+        // 3. 刚好在窗口内 (过去)
+        assert!(token_auth(&token, TEST_TOKEN_BASE, BASE_TIME - 29_999));
+        // 4. 刚好在窗口外 (过去，拒绝)
+        assert!(!token_auth(&token, TEST_TOKEN_BASE, BASE_TIME - 30_000));
+    }
+
+    #[test]
+    fn test_token_wrong_key_rejected() {
+        let nonce = 11111;
+        let token = token_gen(TEST_TOKEN_BASE, BASE_TIME, nonce);
+
+        let wrong_key: &[u8; 16] = b"0000000000000000";
+        assert!(!token_auth(&token, wrong_key, BASE_TIME));
+    }
+
+    #[test]
+    fn test_token_tampering_rejected() {
+        let nonce = 22222;
+        let mut token = token_gen(TEST_TOKEN_BASE, BASE_TIME, nonce);
+
+        let last_char = token.pop().unwrap();
+        let tampered_char = if last_char == 'A' { 'B' } else { 'A' };
+        token.push(tampered_char);
+
+        assert!(!token_auth(&token, TEST_TOKEN_BASE, BASE_TIME));
+    }
+
+    #[test]
+    fn test_token_invalid_base64() {
+        assert!(!token_auth("not_a_valid_base64_!@#", TEST_TOKEN_BASE, BASE_TIME));
+    }
+
+
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn test_gen_auth_token_integration() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let token = gen_auth_token(TEST_TOKEN_BASE);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        assert!(token_auth(&token, TEST_TOKEN_BASE, now));
+    }
+
+
+    #[test]
+    fn test_derive_keys_determinism() {
+        let auth_key = "super_secret_password";
+        let domain = "api.example.com";
+
+        let keys1 = derive_keys(auth_key, domain).unwrap();
+        let keys2 = derive_keys(auth_key, domain).unwrap();
+
+        assert_eq!(keys1.key16, keys2.key16);
+        assert_eq!(keys1.key32, keys2.key32);
+        assert_eq!(keys1.token_base, keys2.token_base);
+    }
+
+    #[test]
+    fn test_derive_keys_domain_separation() {
+        let auth_key = "super_secret_password";
+
+        let keys_domain_a = derive_keys(auth_key, "siteA.com").unwrap();
+        let keys_domain_b = derive_keys(auth_key, "siteB.com").unwrap();
+
+        assert_ne!(keys_domain_a.key16, keys_domain_b.key16);
+        assert_ne!(keys_domain_a.key32, keys_domain_b.key32);
+        assert_ne!(keys_domain_a.token_base, keys_domain_b.token_base);
+    }
+
+}

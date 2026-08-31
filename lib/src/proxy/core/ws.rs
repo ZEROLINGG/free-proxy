@@ -1,7 +1,5 @@
 // lib/src/proxy/core/ws.rs
 
-
-
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
@@ -20,22 +18,13 @@ use crate::ws::{WsCache, WsData, WsFrame, WsTunnelMsg};
 use super::Shared;
 
 const TUNNEL_PING_INTERVAL: Duration = Duration::from_secs(60);
-/// 每轮读取前保证至少剩余这么多可写容量：既避免 read_buf 在零容量时返回
-/// Ok(0) 被误判为 EOF，也以较大块读取减少系统调用次数。
+/// 每轮读取前保证至少剩余这么多可写容量
 const READ_CHUNK: usize = 64 * 1024;
 /// 控制帧（pong / close / 错误页）有界通道容量：体积小、频率低，32 足够。
 const CTRL_CHANNEL_CAP: usize = 32;
 /// 业务下行数据有界通道容量：writer 来不及写时提供缓冲，形成自然的 TCP 背压。
 const DATA_CHANNEL_CAP: usize = 64;
 
-/// 浏览器 WS 升级请求 → worker WS 隧道全生命周期。
-///
-/// `header` 为浏览器原始升级请求，`remaining` 为其后同包到达的超读字节
-/// （可能已含首批 WS 帧），`is_https` 决定头帧末尾的 wss 标志位。
-///
-/// `stream` 按值传入（而非 `&mut S`）：upload / download / writer 被拆分为
-/// 三个 `tokio::spawn` 任务以获得真正的并行调度，这要求 S 满足 Send + 'static。
-/// 线路协议（HTTP 头帧、WS 帧格式、加密/压缩管线）完全不变。
 pub(crate) async fn handle_ws_proxy<S>(
     stream: S,
     header: &ReqHeader,
@@ -154,8 +143,7 @@ where
                         algo,
                         &key16,
                         &key32,
-                    )?;
-                    // feed 暂存、循环末统一 flush，减少 WS 隧道上的小包 syscall
+                    )?; // 用于立即刷新WsTunnel，无回pong
                     ws_tx.feed(Message::Binary(payload)).await?;
                     needs_flush = true;
 
@@ -205,8 +193,6 @@ where
             }
 
             // 保证 read_buf 有足够剩余可写容量：
-            // 1) 容量将尽时 reserve，避免 read_buf 在零剩余容量下返回 Ok(0) 被误判为 EOF；
-            // 2) 尽量大块读取，减少系统调用。
             if buf.capacity() - buf.len() < READ_CHUNK / 4 {
                 buf.reserve(READ_CHUNK);
             }
@@ -348,10 +334,7 @@ where
     Ok(())
 }
 
-/// 唯一的浏览器侧写协程：从高优先级 ctrl 与低优先级 data 通道取出待写字节并落盘。
-/// `biased` select 保证控制帧（pong / close / 错误页）优先出队，从根上消除此前
-/// Arc<Mutex<WriteHalf>> 下"大数据写入长期持锁、小而急的控制帧被无限期阻塞"的
-/// 优先级反转。两个通道的 sender 全部 drop 后，writer 排空已入队字节并自然退出。
+/// 唯一的浏览器侧写协程
 async fn run_writer<W>(
     mut wr: WriteHalf<W>,
     mut ctrl_rx: mpsc::Receiver<Bytes>,
@@ -384,7 +367,7 @@ where
             }
         }
     }
-
+    let _ = wr.shutdown().await;
     Ok(())
 }
 

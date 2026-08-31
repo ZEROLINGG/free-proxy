@@ -65,6 +65,7 @@ pub(super) fn split_body_prefix(remaining: &[u8], extent: &BodyExtent) -> (usize
 }
 
 /// 一次性 push 的处理结果
+#[derive(Debug)]
 pub(super) struct PumpPushed {
     /// 应转发给 worker 的负载字节（chunked 模式下已解码：仅 chunk 数据，无分帧）
     pub payload: BytesMut,
@@ -262,3 +263,172 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64> {
     u64::from_str_radix(hex_str, 16).map_err(|_| anyhow!("malformed chunked body: invalid chunk size"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_body_extent_basic() {
+        // 无 Body
+        assert_eq!(body_extent(&[]).unwrap(), BodyExtent::NoBody);
+
+        // Content-Length
+        assert_eq!(
+            body_extent(&[("Content-Length".into(), "1024".into())]).unwrap(),
+            BodyExtent::ContentLength(1024)
+        );
+
+        // Chunked
+        assert_eq!(
+            body_extent(&[("Transfer-Encoding".into(), "chunked".into())]).unwrap(),
+            BodyExtent::Chunked
+        );
+    }
+
+    #[test]
+    fn test_body_extent_overrides_and_smuggling_defenses() {
+        // RFC 9112 规定：Transfer-Encoding: chunked 的优先级高于 Content-Length
+        let headers = vec![
+            ("Content-Length".into(), "999".into()),
+            ("Transfer-Encoding".into(), "chunked".into()),
+        ];
+        assert_eq!(body_extent(&headers).unwrap(), BodyExtent::Chunked);
+
+        // 防走私：重复的 Content-Length 必须严格拦截
+        let headers = vec![
+            ("Content-Length".into(), "10".into()),
+            ("content-length".into(), "20".into()), // 大小写不敏感的重复
+        ];
+        assert!(body_extent(&headers).is_err());
+
+        // 防走私：非法的 Content-Length 必须严格拦截
+        let headers = vec![("Content-Length".into(), "-10".into())];
+        assert!(body_extent(&headers).is_err());
+        let headers = vec![("Content-Length".into(), "10 abc".into())];
+        assert!(body_extent(&headers).is_err());
+    }
+
+    #[test]
+    fn test_split_body_prefix() {
+        let data = b"1234567890";
+
+        // 无 Body: 全部属于下一个请求 (0属于当前, 10属于下一个)
+        assert_eq!(split_body_prefix(data, &BodyExtent::NoBody), (0, 10));
+
+        // Chunked: 在解码前无法预知边界，故当前分配器全部吞下 (10属于当前, 0属于下一个)
+        assert_eq!(split_body_prefix(data, &BodyExtent::Chunked), (10, 0));
+
+        // Content-Length: 截断
+        assert_eq!(split_body_prefix(data, &BodyExtent::ContentLength(4)), (4, 6));
+        assert_eq!(split_body_prefix(data, &BodyExtent::ContentLength(20)), (10, 0));
+    }
+
+    #[test]
+    fn test_pump_tracker_content_length() {
+        let mut tracker = PumpTracker::new(&BodyExtent::ContentLength(5)).unwrap();
+
+        // 推入部分数据
+        let res = tracker.push(b"123").unwrap();
+        assert_eq!(&res.payload[..], b"123");
+        assert_eq!(res.end_at, None); // 尚未结束
+
+        // 推入超出边界的数据 (流水线粘包)
+        let res = tracker.push(b"45_NEXT_REQ").unwrap();
+        assert_eq!(&res.payload[..], b"45"); // 只取剩下的 2 字节
+        assert_eq!(res.end_at, Some(2)); // 精确指出在索引 2 处结束 (后面的 _NEXT_REQ 归还 parser)
+    }
+
+    #[test]
+    fn test_chunked_decoder_happy_path() {
+        let mut decoder = ChunkedDecoder::new();
+
+        // 标准的 Chunked 流：5 字节 + 2 字节 + 结束块
+        let data = b"5\r\nhello\r\n2\r\n! \r\n0\r\n\r\n";
+
+        let res = decoder.feed(data).unwrap();
+        assert_eq!(&res.payload[..], b"hello! ");
+
+        assert_eq!(res.end_at, Some(22));
+    }
+
+    #[test]
+    fn test_chunked_decoder_pipelining() {
+        let mut decoder = ChunkedDecoder::new();
+
+        // 包含扩展头(;ext)、数据、尾部Trailer，以及紧随其后的下一个 HTTP 请求
+        let data = b"4;ext=123\r\nRust\r\n0\r\nMy-Trailer: xyz\r\n\r\nGET / HTTP/1.1\r\n";
+
+        let res = decoder.feed(data).unwrap();
+
+        // 解码器必须剥离 size、ext、CRLF 和 Trailer，只保留纯数据
+        assert_eq!(&res.payload[..], b"Rust");
+
+        // 精确定位："...\r\n\r\n" 结束的索引位置。
+        // "4;ext=123\r\n" (11) + "Rust\r\n" (6) + "0\r\n" (3) + "My-Trailer: xyz\r\n\r\n" (19) = 39
+        assert_eq!(res.end_at, Some(39));
+    }
+
+    #[test]
+    fn test_chunked_decoder_fragmentation() {
+        let mut decoder = ChunkedDecoder::new();
+        let payload = b"3\r\nfoo\r\n3\r\nbar\r\n0\r\n\r\n";
+
+        // 极限测试：TCP 严重拆包，每次只收到 1 个字节
+        let mut combined_payload = Vec::new();
+        let mut end_at = None;
+
+        for i in 0..payload.len() {
+            let chunk = &payload[i..=i];
+            let res = decoder.feed(chunk).unwrap();
+            combined_payload.extend_from_slice(&res.payload);
+
+            if res.end_at.is_some() {
+                end_at = res.end_at;
+                // 确保只有在最后一个字节时才触发结束
+                assert_eq!(i, payload.len() - 1);
+            }
+        }
+
+        assert_eq!(&combined_payload[..], b"foobar");
+        assert_eq!(end_at, Some(1)); // 最后一次 feed 长度为 1，在索引 1 处结束
+    }
+
+    #[test]
+    fn test_chunked_decoder_tricky_payload() {
+        let mut decoder = ChunkedDecoder::new();
+        // 负载内容恰好包含了像 Chunk 结束符的特征，验证基于长度计数的解码不会被内容干扰
+        let data = b"8\r\n0\r\n\r\nxxx\r\n0\r\n\r\n";
+        let res = decoder.feed(data).unwrap();
+
+        assert_eq!(&res.payload[..], b"0\r\n\r\nxxx");
+
+        assert_eq!(res.end_at, Some(18));
+    }
+
+    #[test]
+    fn test_chunked_decoder_malformed_errors() {
+        // 错误 1: Chunk 声明长度为 3，读取 3 字节 "foo" 之后，紧跟的必须是 \r\n，但这里给的是 "X\n"
+        let mut dec = ChunkedDecoder::new();
+        assert!(dec.feed(b"3\r\nfooX\n0\r\n\r\n").is_err());
+
+        // 错误 2: 非法的十六进制长度
+        let mut dec = ChunkedDecoder::new();
+        assert!(dec.feed(b"ZZZ\r\nhello\r\n0\r\n\r\n").is_err());
+
+        // 错误 3: 空的长度行
+        let mut dec = ChunkedDecoder::new();
+        assert!(dec.feed(b"\r\nhello\r\n").is_err());
+    }
+
+    #[test]
+    fn test_chunked_decoder_dos_protection() {
+        let mut decoder = ChunkedDecoder::new();
+
+        // 制造一个长达 70KB 的 Chunk Size 行（没有任何 \r\n 换行），模拟攻击者耗尽内存
+        let malicious_data = vec![b'A'; 70 * 1024];
+
+        let result = decoder.feed(&malicious_data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("chunk size line too long"));
+    }
+}

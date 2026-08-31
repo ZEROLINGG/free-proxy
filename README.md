@@ -177,25 +177,64 @@ Cloudflare Workers 免费版每天提供约 10 万次请求额度，个人日常
 
 ```
 free-proxy/
-├── lib/                  # 双端共享核心库（客户端 / Worker 共用同一份实现）
+├── package.json                  # 根 npm 脚本（server-dev/deploy, client-dev, test-lib, test-e2e）
+├── deny.toml                     # cargo-deny 共享配置（四个 crate 共用）
+├── .github/workflows/release.yml # tag 触发的发布 CI（桌面 + CLI + Worker zip）
+├── lib/src/                      # 双端共享核心库——编译为 native 和 wasm32 两种目标
+│   ├── aead.rs                   #   AEAD 加密：ChaCha20-Poly1305 / Ascon-AEAD128
+│   ├── algo.rs                   #   压缩 × 加密组合协商 + URL 契约 /api/{version}/{target}
+│   ├── base.rs                   #   base64 编解码
+│   ├── client/                   #   仅客户端（feature "client"）：共享客户端逻辑
+│   │   ├── mod.rs                #     ProxySettings / IDENTIFIER / DEFAULT_PORT 重导出
+│   │   ├── config.rs             #     settings.json 读写（CLI 与 GUI 共享 app_data_dir）
+│   │   ├── ca.rs                 #     本地 CA 证书管理
+│   │   ├── speed.rs              #     优选 IP 测速编排
+│   │   └── subscribe.rs          #     Clash / sing-box / base64 订阅导出
+│   ├── compress.rs               #   zstd / lz4 压缩
+│   ├── frames.rs                 #   二进制帧流协议：[4B 大端长度 | 负载]，零长帧 = 结束
+│   ├── hash.rs                   #   sha1 / sha2 哈希
+│   ├── http.rs                   #   httparse 头部解析 + UrlBuilder（零拷贝）
+│   ├── kdf.rs                    #   HKDF 密钥派生
+│   ├── lib.rs                    #   crate 根：feature 门控重导出 + 日志初始化
+│   ├── log.rs                    #   统一日志宏（error!/warn!/info!/debug!/trace!）
+│   ├── tool.rs                   #   derive_keys（auth_key+domain）、时间窗令牌认证、XOR 混淆
+│   ├── ws.rs                     #   RFC 6455 帧 + WsTunnelMsg（客户端与 Worker 共用）
+│   ├── proxy/                    #   仅客户端（feature "client"）：本地 HTTP 代理
+│   │   ├── mod.rs                #     ProxyConfig / Shared / 代理生命周期
+│   │   ├── connection.rs         #     连接分发（明文 HTTP vs CONNECT）
+│   │   ├── body.rs               #     请求体边界解析
+│   │   ├── client.rs             #     上游 reqwest 客户端（主/优选IP/WS HTTP1.1）
+│   │   ├── tls.rs                #     MITM TLS：自签 CA + 每 SNI 叶子证书（moka 缓存）
+│   │   └── core/                 #     转发引擎（serve 循环，EOS 保活）
+│   │       ├── mod.rs            #       read_raw / RawRead（read_buf 零拷贝读循环）
+│   │       ├── http.rs           #       HTTP 中继：头部帧 → 体泵 → 响应转发
+│   │       └── ws.rs             #       WS 隧道客户端侧（RFC6455 解析/掩码/重组；
+│   │                             #       上传/下载/写入任务 + ctrl/data 通道）
+│   └── speed_test/               #   仅客户端：优选 IP 两阶段测速
+│       ├── mod.rs                #     模块入口
+│       ├── tcping.rs             #     阶段一：TCP 连接延迟探测
+│       ├── health.rs             #     阶段二：Worker /health 检查
+│       └── ip.rs                 #     Cloudflare IP 候选区间
+├── server-rs/                    # Cloudflare Worker（Rust → wasm32，worker crate + axum）
+│   ├── wrangler.toml             # worker 配置；[dev] port=80；勿动 compatibility_flags
+│   ├── .dev.vars                 # gitignored 开发密钥（key/domain）
 │   └── src/
-│       ├── algo.rs       # 算法分发：压缩 × 加密组合与 URL 契约
-│       ├── frames.rs     # 私有二进制帧流协议（[4B 长度 | 负载]，零长帧 = 结束）
-│       ├── http.rs       # HTTP 头解析（httparse，零拷贝）
-│       ├── aead.rs       # ChaCha20-Poly1305 / Ascon-AEAD128 (NIST SP 800-232)
-│       ├── compress.rs   # zstd / lz4
-│       ├── kdf.rs        # HKDF
-│       ├── tool.rs       # 密钥派生、时间窗令牌
-│       ├── ws.rs         # WebSocket 协议层：RFC 6455 帧解析 / 分片重组 / 隧道消息（WsTunnelMsg）
-│       └── proxy/        # 客户端本地代理 + MITM TLS（tls.rs）+ WS 隧道（ws.rs）
-│       └── speed_test/   # tcping / health 两阶段优选 IP 测速
-├── server-rs/            # Cloudflare Worker（Rust 编译到 wasm32）
-│   ├── wrangler.toml
-│   └── src/              # /api/{version}/{target} HTTP 代理、/ws/{version}/{target} WS 隧道、/subscribe 订阅、/health
-├── client_cli/           # 命令行客户端
-└── client_tauri/         # Tauri 2 + React 19 客户端（桌面 + Android）
-    ├── src/              # 前端页面与状态（Dashboard / 代理 / 测速 / CA）
-    └── src-tauri/        # 本地代理、CA 安装、测速等 Tauri 命令
+│       ├── app.rs                #   axum 路由、Bearer 认证中间件（±30s 窗口）、路由表
+│       ├── proxy_http.rs         #   POST /api/{version}/{target}：流式解密→请求→再加密
+│       ├── proxy_ws.rs           #   GET /ws/{version}/{target}：上游 WS 握手 + 全双工中继
+│       ├── subscribe.rs          #   GET /subscribe/{port}：Clash / sing-box / base64 订阅
+│       └── lib.rs                #   Worker 入口
+├── client_cli/src/               # CLI 客户端：main.rs（clap）、run.rs（代理循环）、speed.rs、
+│                                 # health.rs、ca.rs（证书安装）、config.rs（settings.json）
+├── client_tauri/                 # Tauri 2 + React 19 客户端（桌面 + Android）
+│   ├── src/                      # React 前端：pages/（Dashboard、ProxySettings、SpeedTest、
+│   │                             # CaCert、About）、components/{layout,ui}/、store/
+│   └── src-tauri/                # Tauri 后端：commands/（proxy、speed、settings）、tray
+└── lib_test/                     # E2E 全链路测试（cargo run，非 cargo test）
+    └── src/
+        ├── main.rs               #   测试入口
+        ├── cs.rs                 #   全链路编排（Worker + 代理 + 目标站）
+        └── test/                 #   HTTP / HTTPS 可达性与代理测试用例
 ```
 
 ### 开发命令
@@ -209,9 +248,10 @@ npm run server-deploy
 npm run client-dev
 # 客户端 Android 开发
 npm run client-android-dev
-
-# 共享库单元测试（含大量客户端↔服务端契约 / 往返测试）
-cargo test -p lib
+# 共享库单元测试
+npm run test-lib
+# 端到端集成测试
+npm run test-e2e
 ```
 
 ### 安全模型

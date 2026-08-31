@@ -106,3 +106,155 @@ pub fn enc_frame(data: &[u8], algo: ProxyAlgo, key16: &[u8], key32: &[u8]) -> st
         .map_err(|e| std::io::Error::other(format!("encode failed: {e}")))?;
     Ok(Bytes::from(make_frame(&enc)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algo::{ProxyAead, ProxyAlgo, ProxyCompressor};
+
+
+    #[test]
+    fn test_make_frame_normal() {
+        let payload = b"hello world";
+        let frame = make_frame(payload);
+
+        // 长度 = 4 (header) + 11 (payload) = 15
+        assert_eq!(frame.len(), 15);
+        // 大端编码的 11 (0x00, 0x00, 0x00, 0x0B)
+        assert_eq!(&frame[0..4], &[0, 0, 0, 11]);
+        assert_eq!(&frame[4..], payload);
+    }
+
+    #[test]
+    fn test_make_frame_eos() {
+        let frame = make_frame(&[]);
+        assert_eq!(frame.len(), 4);
+        assert_eq!(&frame[..], &[0, 0, 0, 0]);
+    }
+
+
+    #[test]
+    fn test_cache_normal_pop() {
+        let mut cache = FrameCache::new();
+        let frame = make_frame(b"ping");
+
+        cache.push(&frame);
+
+        match cache.try_pop().unwrap() {
+            Frame::Frame(data) => assert_eq!(&data[..], b"ping"),
+            _ => panic!("Expected Frame"),
+        }
+
+        // 弹出后缓存应该为空，再 pop 返回 None
+        assert_eq!(cache.try_pop().unwrap(), Frame::None);
+    }
+
+    #[test]
+    fn test_cache_fragmentation_and_reassembly() {
+        // 测试拆包场景：网络数据一段一段到达
+        let mut cache = FrameCache::new();
+        let payload = b"fragmented payload";
+        let frame = make_frame(payload);
+
+        cache.push(&frame[0..2]);
+        assert_eq!(cache.try_pop().unwrap(), Frame::None);
+
+        cache.push(&frame[2..7]);
+        assert_eq!(cache.try_pop().unwrap(), Frame::None);
+
+        cache.push(&frame[7..]);
+
+        match cache.try_pop().unwrap() {
+            Frame::Frame(data) => assert_eq!(&data[..], payload),
+            _ => panic!("Expected Frame"),
+        }
+    }
+
+    #[test]
+    fn test_cache_multiple_frames_in_one_push() {
+        let mut cache = FrameCache::new();
+
+        let mut multi_frame_data = Vec::new();
+        multi_frame_data.extend_from_slice(&make_frame(b"frame1"));
+        multi_frame_data.extend_from_slice(&make_frame(b"frame2"));
+        multi_frame_data.extend_from_slice(&make_frame(b"frame3"));
+
+        cache.push(&multi_frame_data);
+
+        let expected = [b"frame1", b"frame2", b"frame3"];
+        for expected_payload in expected.iter() {
+            match cache.try_pop().unwrap() {
+                Frame::Frame(data) => assert_eq!(&data[..], *expected_payload),
+                _ => panic!("Expected Frame"),
+            }
+        }
+
+        assert_eq!(cache.try_pop().unwrap(), Frame::None);
+    }
+
+    #[test]
+    fn test_cache_eos_behavior() {
+        let mut cache = FrameCache::new();
+
+        cache.push(&make_frame(b"last data"));
+        cache.push(&make_frame(&[])); // EOS 帧
+
+        match cache.try_pop().unwrap() {
+            Frame::Frame(data) => assert_eq!(&data[..], b"last data"),
+            _ => panic!("Expected Frame"),
+        }
+
+        assert_eq!(cache.try_pop().unwrap(), Frame::Eos);
+
+        assert_eq!(cache.try_pop().unwrap(), Frame::Eos);
+
+        cache.push(&make_frame(b"zombie data"));
+        assert_eq!(cache.try_pop().unwrap(), Frame::Eos);
+    }
+
+    #[test]
+    fn test_cache_oversized_frame_rejection() {
+        let mut cache = FrameCache::new();
+
+        let malicious_len: u32 = (MAX_FRAME_PAYLOAD + 1024) as u32;
+        let mut malicious_frame = malicious_len.to_be_bytes().to_vec();
+        malicious_frame.extend_from_slice(b"fake data");
+
+        cache.push(&malicious_frame);
+
+        let result = cache.try_pop();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds max"));
+    }
+
+
+    #[test]
+    fn test_enc_frame_integration() {
+        let key16 = b"1234567890123456";
+        let key32 = b"12345678901234567890123456789012";
+        let algo = ProxyAlgo::new(ProxyCompressor::None, ProxyAead::Ascon128);
+
+        let payload = b"integration test for enc_frame";
+
+        // enc_frame 执行加密并组装为帧
+        let frame_bytes = enc_frame(payload, algo, key16, key32).unwrap();
+
+        // 将产生的帧字节压入解析器
+        let mut cache = FrameCache::new();
+        cache.push(&frame_bytes);
+
+        // 弹出帧
+        let popped_frame = cache.try_pop().unwrap();
+        match popped_frame {
+            Frame::Frame(enc_data) => {
+                // 确保数据已加密/长度发生变化（由于带有 tag/nonce，密文长度应大于原数据）
+                assert!(enc_data.len() > payload.len());
+
+                // 将帧的载荷拿去走逆向解密管线（测试和 algo.rs 闭环）
+                let decoded = crate::algo::decode_chunk(&enc_data, algo.compressor, algo.aead, key16, key32).unwrap();
+                assert_eq!(&decoded[..], payload);
+            }
+            _ => panic!("Expected enc_frame to generate a valid Frame"),
+        }
+    }
+}

@@ -182,8 +182,7 @@ impl ProxyAlgo {
     }
 }
 
-/// 编码管线：先压缩后加密（客户端上行 / 服务端响应块共用）。
-/// 与服务端逻辑逐字节对称，`None` 组合退化为 XOR 混淆。
+/// 编码管线：先压缩后加密。
 pub fn encode_chunk(
     raw: &[u8],
     compressor: ProxyCompressor,
@@ -207,3 +206,154 @@ pub fn decode_chunk(
     compressor.decompress(&decrypted)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    const KEY16: &[u8; 16] = b"1234567890123456";
+    const KEY32: &[u8; 32] = b"12345678901234567890123456789012";
+    const TEST_DATA: &[u8] = b"Hello, Free-Proxy! This is a payload that will go through the pipeline.";
+
+    #[test]
+    fn test_compressor_name_roundtrip() {
+        for &comp in &ProxyCompressor::ALL {
+            let name = comp.name();
+            let parsed = ProxyCompressor::from_str(name).expect("Failed to parse name");
+            assert_eq!(comp, parsed, "Name roundtrip failed for {name}");
+        }
+    }
+
+    #[test]
+    fn test_compressor_version_roundtrip() {
+        for &comp in &ProxyCompressor::ALL {
+            let version = comp.version();
+            let parsed = ProxyCompressor::from_version(version).expect("Failed to parse version");
+            assert_eq!(comp, parsed, "Version roundtrip failed for {version}");
+        }
+    }
+
+    #[test]
+    fn test_compressor_from_str_variations() {
+        assert_eq!(ProxyCompressor::from_str("  ZstD  ").unwrap(), ProxyCompressor::Zstd);
+        assert_eq!(ProxyCompressor::from_str("LZ4").unwrap(), ProxyCompressor::Lz4);
+        assert_eq!(ProxyCompressor::from_str(" None ").unwrap(), ProxyCompressor::None);
+    }
+
+    #[test]
+    fn test_compressor_invalid_inputs() {
+        assert!(ProxyCompressor::from_str("gzip").is_err());
+        assert!(ProxyCompressor::from_version("v2").is_err()); // v2 当前不存在
+    }
+
+    #[test]
+    fn test_compressor_default() {
+        assert_eq!(ProxyCompressor::default(), ProxyCompressor::Lz4);
+    }
+
+
+    #[test]
+    fn test_aead_name_roundtrip() {
+        for &aead in &ProxyAead::ALL {
+            let name = aead.name();
+            let parsed = ProxyAead::from_str(name).expect("Failed to parse name");
+            assert_eq!(aead, parsed, "Name roundtrip failed for {name}");
+        }
+    }
+
+    #[test]
+    fn test_aead_target_roundtrip() {
+        for &aead in &ProxyAead::ALL {
+            let target = aead.target();
+            let parsed = ProxyAead::from_target(target).expect("Failed to parse target");
+            assert_eq!(aead, parsed, "Target roundtrip failed for {target}");
+        }
+    }
+
+    #[test]
+    fn test_aead_from_str_variations() {
+        assert_eq!(ProxyAead::from_str(" ChaCha20Poly1305 ").unwrap(), ProxyAead::ChaCha20Poly1305);
+        assert_eq!(ProxyAead::from_str("chacha20-poly1305").unwrap(), ProxyAead::ChaCha20Poly1305);
+        assert_eq!(ProxyAead::from_str("chacha20_poly1305").unwrap(), ProxyAead::ChaCha20Poly1305);
+        assert_eq!(ProxyAead::from_str("  ASCON128  ").unwrap(), ProxyAead::Ascon128);
+    }
+
+    #[test]
+    fn test_aead_invalid_inputs() {
+        assert!(ProxyAead::from_str("aes-gcm").is_err());
+        assert!(ProxyAead::from_target("post").is_err());
+    }
+
+    #[test]
+    fn test_aead_default() {
+        assert_eq!(ProxyAead::default(), ProxyAead::Ascon128);
+    }
+
+
+    #[test]
+    fn test_proxy_algo_paths() {
+        let algo = ProxyAlgo::new(ProxyCompressor::Zstd, ProxyAead::Ascon128);
+        assert_eq!(algo.api_path(), "/api/v1/get");
+        assert_eq!(algo.ws_path(), "/ws/v1/get");
+
+        let algo2 = ProxyAlgo::new(ProxyCompressor::Lz4, ProxyAead::ChaCha20Poly1305);
+        assert_eq!(algo2.api_path(), "/api/v3/time");
+        assert_eq!(algo2.ws_path(), "/ws/v3/time");
+    }
+
+
+    #[test]
+    fn test_pipeline_all_combinations_roundtrip() {
+        for &comp in &ProxyCompressor::ALL {
+            for &aead in &ProxyAead::ALL {
+                let encoded = encode_chunk(TEST_DATA, comp, aead, KEY16, KEY32)
+                    .unwrap_or_else(|e| panic!("Encode failed for {:?}+{:?}: {}", comp, aead, e));
+
+                assert_ne!(encoded, TEST_DATA, "Encoded data should not equal plaintext");
+
+                let decoded = decode_chunk(&encoded, comp, aead, KEY16, KEY32)
+                    .unwrap_or_else(|e| panic!("Decode failed for {:?}+{:?}: {}", comp, aead, e));
+
+                assert_eq!(
+                    TEST_DATA, &decoded[..],
+                    "Decoded data mismatch for {:?} + {:?}", comp, aead
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_pipeline_tamper_resistance() {
+        let comp = ProxyCompressor::Zstd;
+        let aead = ProxyAead::Ascon128;
+
+        let mut encoded = encode_chunk(TEST_DATA, comp, aead, KEY16, KEY32).unwrap();
+
+        let len = encoded.len();
+        encoded[len / 2] ^= 0x55;
+
+        let result = decode_chunk(&encoded, comp, aead, KEY16, KEY32);
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("decryption failed") || err_msg.contains("nonce"),
+            "Unexpected error message: {}", err_msg
+        );
+    }
+
+    #[test]
+    fn test_pipeline_wrong_key() {
+        let comp = ProxyCompressor::Lz4;
+        let aead = ProxyAead::ChaCha20Poly1305;
+
+        let encoded = encode_chunk(TEST_DATA, comp, aead, KEY16, KEY32).unwrap();
+
+        // 错误的 key
+        let wrong_key32 = b"00000000000000000000000000000000";
+        let result = decode_chunk(&encoded, comp, aead, KEY16, wrong_key32);
+
+        assert!(result.is_err());
+    }
+}
