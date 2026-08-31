@@ -34,11 +34,6 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Setup pnpm 10
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
       - name: Setup Rust (wasm32)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,4 +62,11 @@ jobs:
           Stop-Service -Name SyncShareSvc -Force -ErrorAction SilentlyContinue
 
       - name: Run full E2E suite
-        run: pnpm run test-e2e
+        working-directory: ./lib_test
+        run: |
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            sudo -E cargo run
+          else
+            cargo run
+          fi
+        shell: bash

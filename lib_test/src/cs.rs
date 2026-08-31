@@ -99,16 +99,17 @@ ansi_log = "true"
 
         let mut child = Shell::new(if cfg!(windows) { "powershell" } else { "sh" })
             .enable_pty()
-            .work_dir(Self::project_root()?)
+            .work_dir(Self::project_root()?.join("server-rs"))
             .disable_snapshot()
             .line_callback()
+            .init_input(" \n")
             .on_output(move |line| {
                 let flag = crash_flag_clone.clone();
                 async move {
                     if !line.trim().is_empty()
                         && !line.contains("[custom build]")
                         && !line.contains(
-                        r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#,
+                        r#"wrangler dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#,
                     )
                         && !line.contains("Using secrets defined in .dev.vars")
                         && !line.contains("╭───────────────────────────╮")
@@ -152,7 +153,7 @@ ansi_log = "true"
             .await?;
 
         child
-            .send_line(r#"pnpm server-dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
+            .send_line(r#"wrangler dev;echo "$((222*2)) [ERROR]:server-dev $((222*2))""#)
             .await?;
 
         self.child = Some(child);
